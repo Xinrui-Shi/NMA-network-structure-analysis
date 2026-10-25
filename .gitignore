@@ -1,0 +1,20 @@
+# RStudio temporary files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# R Markdown cache
+*_cache/
+*_files/
+
+# Temporary output
+*.utf8.md
+*.knit.md
+
+# macOS files
+.DS_Store
+
+# renv local library (if using renv)
+renv/library/
+renv/staging/

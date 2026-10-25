@@ -1,0 +1,844 @@
+---
+title: "Copula Null-Model Sampling"
+author: "Xinrui Shi"
+date: "2026-08-04"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+set.seed(1220)
+
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(tnet)
+library(copula)
+
+input_dir <- dirname(knitr::current_input(dir = TRUE))
+report_dir <- if (file.exists(file.path(input_dir, "NMA network structure analysis.Rproj"))) {
+  input_dir
+} else {
+  normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+}
+empirical_result_dir <- file.path(report_dir, "Empirical data", "results")
+result_dir <- file.path(report_dir, "Simulated data", "results")
+dir.create(result_dir, recursive = TRUE, showWarnings = FALSE)
+
+source(file.path(report_dir, "Common R functions", "simulation_functions.R"))
+source(file.path(report_dir, "Common R functions", "metric_functions.R"))
+
+empirical_legend_label <- "Empirical"
+simulated_legend_label <- "Simulated"
+comparison_labels <- c(
+  "Null Model" = simulated_legend_label,
+  "Database" = empirical_legend_label
+)
+comparison_colors <- c("Null Model" = "grey60", "Database" = "#0072B2")
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    panel.grid.major.x = element_blank()
+  )
+theme_set(plot_theme)
+
+plain_log_labels <- function(x) format(x, scientific = FALSE, trim = TRUE)
+```
+
+# Empirical inputs
+
+This report reads the empirical outputs produced by `empirical_database.Rmd`.
+It does not read the original saved summary metrics from the legacy workflow.
+
+```{r load-empirical-inputs}
+empirical_MNS_file <- file.path(empirical_result_dir, "empirical_MNS.rds")
+empirical_metrics_file <- file.path(empirical_result_dir, "empirical_metrics.rds")
+if (!file.exists(empirical_MNS_file) || !file.exists(empirical_metrics_file)) {
+  stop("Run empirical_database.Rmd first. Missing empirical MNS or metrics output.")
+}
+empirical_MNS <- readRDS(empirical_MNS_file)
+empirical_metrics <- readRDS(empirical_metrics_file)
+if (!"diameter" %in% names(empirical_metrics)) {
+  stop("Run empirical_database.Rmd again. Missing metric: diameter")
+}
+```
+
+## Sampled joint-MNS networks
+
+The dependence among `(M,N,S)` is estimated with a three-dimensional Gaussian
+copula fitted by maximum pseudo-likelihood. Type-1 empirical quantiles retain
+the three observed marginal distributions.
+
+```{r fit-copula-and-simulate}
+MNS_copula_model <- fit_MNS_copula(empirical_MNS)
+copula_parameter_table <- data.frame(
+  Parameter = names(MNS_copula_model$coefficients),
+  Estimate = as.numeric(MNS_copula_model$coefficients)
+)
+knitr::kable(
+  copula_parameter_table,
+  digits = 4,
+  caption = "Fitted Gaussian-copula dependence parameters"
+)
+write.csv(
+  copula_parameter_table,
+  file.path(result_dir, "copula_MNS_parameters.csv"),
+  row.names = FALSE
+)
+
+simulation_file <- file.path(result_dir, "copula_MNS_rewiring_300.rds")
+if (file.exists(simulation_file)) {
+  simulation <- readRDS(simulation_file)
+}
+if (!exists("simulation") || is.null(simulation$simulation_schema_version) ||
+    simulation$simulation_schema_version < 3L) {
+  simulation <- simulate_copula_MNS_rewiring(
+    copula_model = MNS_copula_model,
+    n_qualified = 300L,
+    allocation_attempts_per_MNS = 10L,
+    max_rewiring_attempts = 50L,
+    seed = 123L
+  )
+  saveRDS(simulation, simulation_file)
+}
+stopifnot(length(simulation$networks) == 300L)
+write.csv(
+  simulation$summary,
+  file.path(result_dir, "copula_MNS_sampled_parameters.csv"),
+  row.names = FALSE
+)
+```
+
+# Failure summary
+
+We obtained `r simulation$n_qualified` qualified null-model networks after
+sampling `r simulation$MNS_attempts` joint parameter tuples $(M,N,S)$.
+`r simulation$rejected_MNS_attempts` tuples did not produce a qualified
+network: `r simulation$rejection_summary$count[simulation$rejection_summary$reason == "structurally_infeasible_MNS"]`
+were structurally infeasible before allocation, and
+`r simulation$rejection_summary$count[simulation$rejection_summary$reason == "generation_attempts_exhausted"]`
+were feasible tuples that still failed after all allocation and rewiring
+attempts.
+
+The simulation does **not** explicitly impose $M \geq 2$ or $N \geq 4$ as
+rejection rules. Instead, both requirements are automatically satisfied by
+the empirical margins used after the copula draw: the observed minimum is
+$M=2$ and the observed minimum is $N=4$. Because the sampler uses type-1
+empirical quantiles, it cannot generate values below those minima. The table
+below reports how often these conditions and the edge-count conditions
+occurred among all sampled tuples and among rejected tuples. Conditions can
+overlap, so the rows must not be added.
+
+For the tuples that passed the structural check, the algorithm sampled
+`r simulation$allocation_attempts_total` initial edge allocations on its way
+to the final 300 networks. Before any repair, these allocations experienced
+the defects shown in the second table. These counts are also non-exclusive:
+one allocation can be both disconnected and have low trial or treatment
+degree. The $S<2M$ count is zero at the allocation stage because such a tuple
+is rejected before an allocation is attempted; its total occurrence is shown
+in the tuple-condition table.
+
+All final networks are checked again after rewiring. Therefore, the third
+table directly answers how many of the 300 qualified networks are
+disconnected or violate either degree constraint.
+
+```{r failure-summary}
+failure_overview <- data.frame(
+  Quantity = c(
+    "Qualified networks",
+    "Joint (M,N,S) tuples sampled",
+    "Tuples not producing a qualified network",
+    "Structurally infeasible tuples",
+    "Feasible tuples exhausting generation attempts"
+  ),
+  Count = c(
+    simulation$n_qualified,
+    simulation$MNS_attempts,
+    simulation$rejected_MNS_attempts,
+    simulation$rejection_summary$count[
+      simulation$rejection_summary$reason == "structurally_infeasible_MNS"
+    ],
+    simulation$rejection_summary$count[
+      simulation$rejection_summary$reason == "generation_attempts_exhausted"
+    ]
+  )
+)
+knitr::kable(failure_overview, caption = "Overall generation outcome")
+
+tuple_condition_labels <- c(
+  M_lt_2 = "M < 2 (excluded automatically by empirical margin)",
+  N_lt_4 = "N < 4 (excluded automatically by empirical margin)",
+  S_lt_2M = "S < 2M",
+  S_lt_N = "S < N",
+  S_lt_M_plus_N_minus_1 = "S < M + N - 1",
+  S_gt_MN = "S > MN"
+)
+tuple_condition_table <- simulation$tuple_condition_summary |>
+  mutate(
+    Condition = unname(tuple_condition_labels[condition]),
+    `All sampled tuples` = all_sampled_MNS,
+    `Rejected tuples` = rejected_MNS
+  ) |>
+  select(Condition, `All sampled tuples`, `Rejected tuples`)
+knitr::kable(
+  tuple_condition_table,
+  caption = "Conditions observed in sampled (M,N,S) tuples"
+)
+
+allocation_failure_table <- simulation$allocation_failure_summary |>
+  mutate(
+    Defect = recode(
+      reason,
+      disconnected = "Disconnected",
+      S_lt_2M = "S < 2M",
+      trial_degree_lt_2 = "At least one trial has degree < 2",
+      treatment_degree_lt_1 = "At least one treatment has degree < 1"
+    )
+  ) |>
+  select(Defect, Count = count)
+knitr::kable(
+  allocation_failure_table,
+  caption = paste(
+    "Defects observed across",
+    simulation$allocation_attempts_total,
+    "initial edge allocations"
+  )
+)
+
+final_failure_table <- simulation$final_network_failure_summary |>
+  mutate(
+    Defect = recode(
+      reason,
+      disconnected = "Disconnected",
+      S_lt_2M = "S < 2M",
+      trial_degree_lt_2 = "At least one trial has degree < 2",
+      treatment_degree_lt_1 = "At least one treatment has degree < 1"
+    )
+  ) |>
+  select(Defect, Count = count)
+knitr::kable(
+  final_failure_table,
+  caption = "Defects in the final 300 qualified networks"
+)
+```
+
+## Failures requiring targeted rewiring by number of treatments
+
+The plot below is restricted to networks that ultimately qualified. For each
+number of treatments, it counts networks whose initial allocation failed at
+least one qualification check and therefore required targeted rewiring
+(`rewiring_attempts > 0`).
+
+```{r rewiring-failures-by-treatments, fig.width=8, fig.height=4.5}
+rewiring_failures_by_N <- simulation$summary |>
+  group_by(N) |>
+  summarise(
+    failures_requiring_rewiring = sum(rewiring_attempts > 0L),
+    .groups = "drop"
+  )
+
+p_rewiring_failures_by_N <- ggplot(
+  rewiring_failures_by_N,
+  aes(x = N, y = failures_requiring_rewiring)
+) +
+  geom_col(
+    width = 0.85, fill = "grey60", colour = "grey15", linewidth = 0.25
+  ) +
+  scale_x_continuous(
+    breaks = pretty(range(rewiring_failures_by_N$N), n = 10)
+  ) +
+  scale_y_continuous(
+    breaks = pretty(
+      range(c(0, rewiring_failures_by_N$failures_requiring_rewiring)),
+      n = 6
+    ),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = "Number of treatments",
+    y = "Number of initial failures requiring targeted rewiring"
+  )
+
+p_rewiring_failures_by_N
+
+```
+
+## Rewired edges by number of treatments: separate 10,000-network sample
+
+This diagnostic uses a separate copula sample and continues until 10,000
+qualified networks have been generated. A moved edge counts as one rewired
+edge in the trial- or treatment-degree repair. A double-edge swap used to join
+components counts as two rewired edges. The total is the sum across the three
+repair targets. Initially valid networks are retained with zero rewired edges,
+so each mean describes all qualified networks at that value of $N$.
+
+```{r simulate-rewiring-effort}
+rewiring_effort_file <- file.path(
+  result_dir, "copula_MNS_rewiring_effort_10000.rds"
+)
+if (file.exists(rewiring_effort_file)) {
+  rewiring_effort_simulation <- readRDS(rewiring_effort_file)
+}
+if (!exists("rewiring_effort_simulation") ||
+    is.null(rewiring_effort_simulation$simulation_schema_version) ||
+    rewiring_effort_simulation$simulation_schema_version < 1L ||
+    rewiring_effort_simulation$n_qualified != 10000L) {
+  rewiring_effort_simulation <- simulate_copula_MNS_rewiring_tracked(
+    copula_model = MNS_copula_model,
+    n_qualified = 10000L,
+    allocation_attempts_per_MNS = 10L,
+    max_rewiring_attempts = 50L,
+    seed = 124L
+  )
+  saveRDS(rewiring_effort_simulation, rewiring_effort_file)
+}
+rewiring_effort_summary <- rewiring_effort_simulation$summary
+stopifnot(
+  length(rewiring_effort_simulation$networks) == 10000L,
+  all(vapply(
+    rewiring_effort_simulation$networks,
+    is_valid_rewired_network,
+    logical(1)
+  )),
+  all(
+    rewiring_effort_summary$edges_rewired_total ==
+      rewiring_effort_summary$edges_rewired_fix_trial +
+      rewiring_effort_summary$edges_rewired_fix_treatment +
+      rewiring_effort_summary$edges_rewired_fix_connected
+  )
+)
+write.csv(
+  rewiring_effort_summary,
+  file.path(result_dir, "copula_MNS_rewiring_effort_10000_summary.csv"),
+  row.names = FALSE
+)
+```
+
+```{r mean-rewired-edges-by-treatments, fig.width=8, fig.height=5}
+rewiring_target_labels <- c(
+  edges_rewired_total = "Total",
+  edges_rewired_fix_trial = "Fix trial degree",
+  edges_rewired_fix_treatment = "Fix treatment degree",
+  edges_rewired_fix_connected = "Connect components"
+)
+
+mean_rewired_edges_by_N <- rewiring_effort_summary |>
+  select(N, all_of(names(rewiring_target_labels))) |>
+  pivot_longer(
+    cols = -N,
+    names_to = "rewiring_target",
+    values_to = "edges_rewired"
+  ) |>
+  mutate(
+    rewiring_target = factor(
+      unname(rewiring_target_labels[rewiring_target]),
+      levels = unname(rewiring_target_labels)
+    )
+  ) |>
+  group_by(N, rewiring_target) |>
+  summarise(
+    mean_edges_rewired = mean(edges_rewired),
+    qualified_networks = n(),
+    .groups = "drop"
+  )
+
+write.csv(
+  mean_rewired_edges_by_N,
+  file.path(result_dir, "mean_rewired_edges_by_treatments_10000.csv"),
+  row.names = FALSE
+)
+
+rewiring_target_colors <- c(
+  "Total" = "grey15",
+  "Fix trial degree" = "#0072B2",
+  "Fix treatment degree" = "#D55E00",
+  "Connect components" = "#009E73"
+)
+rewiring_target_linetypes <- c(
+  "Total" = "solid",
+  "Fix trial degree" = "dashed",
+  "Fix treatment degree" = "dotdash",
+  "Connect components" = "dotted"
+)
+
+p_mean_rewired_edges_by_N <- ggplot(
+  mean_rewired_edges_by_N,
+  aes(
+    x = N, y = mean_edges_rewired,
+    colour = rewiring_target, linetype = rewiring_target
+  )
+) +
+  geom_line(linewidth = 0.75) +
+  geom_point(size = 1.8) +
+  scale_colour_manual(values = rewiring_target_colors) +
+  scale_linetype_manual(values = rewiring_target_linetypes) +
+  scale_x_continuous(
+    breaks = pretty(range(mean_rewired_edges_by_N$N), n = 10)
+  ) +
+  scale_y_continuous(
+    breaks = pretty(
+      range(c(0, mean_rewired_edges_by_N$mean_edges_rewired)),
+      n = 6
+    ),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = "Number of treatments",
+    y = "Mean number of rewired edges",
+    colour = "Rewiring target",
+    linetype = "Rewiring target"
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+p_mean_rewired_edges_by_N
+
+```
+
+For the proportional version, each network's rewired-edge count is divided by
+its total number of bipartite edges, $S$, before averaging across qualified
+networks with the same $N$. Thus, the denominator is the realised number of
+trial--treatment edges in that network rather than the number of possible
+edges, $MN$.
+
+```{r mean-proportion-rewired-edges-by-treatments, fig.width=8, fig.height=5}
+mean_proportion_rewired_by_N <- rewiring_effort_summary |>
+  mutate(
+    across(
+      all_of(names(rewiring_target_labels)),
+      ~ .x / S
+    )
+  ) |>
+  select(N, all_of(names(rewiring_target_labels))) |>
+  pivot_longer(
+    cols = -N,
+    names_to = "rewiring_target",
+    values_to = "proportion_rewired"
+  ) |>
+  mutate(
+    rewiring_target = factor(
+      unname(rewiring_target_labels[rewiring_target]),
+      levels = unname(rewiring_target_labels)
+    )
+  ) |>
+  group_by(N, rewiring_target) |>
+  summarise(
+    mean_proportion_rewired = mean(proportion_rewired),
+    qualified_networks = n(),
+    .groups = "drop"
+  )
+
+write.csv(
+  mean_proportion_rewired_by_N,
+  file.path(
+    result_dir,
+    "mean_proportion_rewired_edges_by_treatments_10000.csv"
+  ),
+  row.names = FALSE
+)
+
+p_mean_proportion_rewired_by_N <- ggplot(
+  mean_proportion_rewired_by_N,
+  aes(
+    x = N, y = mean_proportion_rewired,
+    colour = rewiring_target, linetype = rewiring_target
+  )
+) +
+  geom_line(linewidth = 0.75) +
+  geom_point(size = 1.8) +
+  scale_colour_manual(values = rewiring_target_colors) +
+  scale_linetype_manual(values = rewiring_target_linetypes) +
+  scale_x_continuous(
+    breaks = pretty(range(mean_proportion_rewired_by_N$N), n = 10)
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent(accuracy = 1),
+    breaks = pretty(
+      range(c(0, mean_proportion_rewired_by_N$mean_proportion_rewired)),
+      n = 6
+    ),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    x = "Number of treatments",
+    y = paste(
+      "Mean proportion of bipartite edges rewired",
+      "among networks with the same N",
+      sep = "\n"
+    ),
+    colour = "Rewiring target",
+    linetype = "Rewiring target"
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+p_mean_proportion_rewired_by_N
+
+```
+
+
+
+
+# Verification check plots
+
+`r empirical_legend_label` layers are orange and are drawn after the grey
+`r simulated_legend_label` layers.
+
+## Numbers of trials and treatments
+
+```{r MN-comparison, fig.width=12, fig.height=4}
+MN_comparison <- bind_rows(
+  simulation$summary |> transmute(M, N, Data = "Null Model"),
+  empirical_MNS |> transmute(M, N, Data = "Database")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+comparison_histogram <- function(variable, binwidth, boundary, x_label, title) {
+  ggplot() +
+    geom_histogram(
+      data = filter(MN_comparison, Data == "Null Model"),
+      aes(x = .data[[variable]], fill = Data),
+      colour = "grey15", linewidth = 0.25,
+      alpha = 0.9, binwidth = binwidth, boundary = boundary,
+      position = "identity", show.legend = FALSE
+    ) +
+    geom_histogram(
+      data = filter(MN_comparison, Data == "Database"),
+      aes(x = .data[[variable]], fill = Data),
+      colour = "grey15", linewidth = 0.25,
+      alpha = 0.7, binwidth = binwidth, boundary = boundary,
+      position = "identity", show.legend = FALSE
+    ) +
+    scale_fill_manual(values = comparison_colors, labels = comparison_labels) +
+    labs(title = title, x = x_label, y = "Number of networks")
+}
+
+p_M_compare <- comparison_histogram(
+  "M", 10, 0, "Number of trials", "(a)"
+)
+p_N_compare <- comparison_histogram(
+  "N", 2, 4, "Number of treatments", "(b)"
+)
+p_MN_compare <- ggplot() +
+  geom_count(
+    data = filter(MN_comparison, Data == "Null Model"),
+    aes(x = N, y = M, fill = Data, size = after_stat(n)),
+    shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.90
+  ) +
+  geom_count(
+    data = filter(MN_comparison, Data == "Database"),
+    aes(x = N, y = M, fill = Data, size = after_stat(n)),
+    shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.70
+  ) +
+  scale_fill_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data"
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 10), breaks = c(1, 2, 5, 10),
+    name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_log10() + scale_y_log10(labels = plain_log_labels) +
+  labs(title = "(c)", x = "Number of treatments", y = "Number of trials")
+
+p_compare_MN <- p_M_compare + p_N_compare + p_MN_compare +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal"
+  )
+p_compare_MN
+
+```
+
+## Number of bipartite edges and joint relationships
+
+```{r MNS-comparison, fig.width=12, fig.height=4}
+MNS_comparison <- bind_rows(
+  simulation$summary |> transmute(M, N, S, Data = "Null Model"),
+  empirical_MNS |> transmute(M, N, S, Data = "Database")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_S_compare <- ggplot() +
+  geom_histogram(
+    data = filter(MNS_comparison, Data == "Null Model"),
+    aes(x = S, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.9, binwidth = 20, boundary = 0, position = "identity",
+    show.legend = FALSE
+  ) +
+  geom_histogram(
+    data = filter(MNS_comparison, Data == "Database"),
+    aes(x = S, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.7, binwidth = 20, boundary = 0, position = "identity",
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = comparison_colors, labels = comparison_labels) +
+  labs(title = "(a)", x = "Total number of arms", y = "Number of networks")
+
+MNS_scatter <- function(variable, x_label, title) {
+  ggplot() +
+    geom_count(
+      data = filter(MNS_comparison, Data == "Null Model"),
+      aes(x = .data[[variable]], y = S, fill = Data,
+          size = after_stat(n)),
+      shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.90
+    ) +
+    geom_count(
+      data = filter(MNS_comparison, Data == "Database"),
+      aes(x = .data[[variable]], y = S, fill = Data,
+          size = after_stat(n)),
+      shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.70
+    ) +
+    scale_fill_manual(
+      values = comparison_colors, labels = comparison_labels, name = "Data"
+    ) +
+    scale_size_area(
+      max_size = 8, limits = c(1, 8), breaks = c(1, 2, 5, 8),
+      name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+    ) +
+    scale_x_log10() + scale_y_log10() +
+    labs(title = title, x = x_label, y = "Total number of arms")
+}
+
+p_MS_compare <- MNS_scatter("M", "Number of trials", "(b)")
+p_NS_compare <- MNS_scatter("N", "Number of treatments", "(c)")
+p_compare_MNS <- p_S_compare + p_MS_compare + p_NS_compare +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal"
+  )
+p_compare_MNS
+
+```
+
+# Compute sampled-network metrics
+
+Metrics and degree vectors are computed here and saved for
+`metrics comparison.Rmd`. The comparison report does not reopen or analyse the
+network matrices.
+
+```{r compute-null-results}
+# This table includes the mean bipartite trial/treatment degrees and the mean
+# weighted/unweighted unipartite degrees returned by metric_functions.R.
+null_metrics <- compute_metrics_for_networks(simulation$networks)
+mean_degree_columns <- c(
+  "mean_bipartite_trial_degree",
+  "mean_bipartite_treatment_degree",
+  "mean_unipartite_weighted_degree",
+  "mean_unipartite_unweighted_degree"
+)
+stopifnot(all(mean_degree_columns %in% names(null_metrics)))
+degree_irregularity_columns <- c(
+  "bi_trial_deg_irreg",
+  "bi_treatment_deg_irreg"
+)
+stopifnot(all(degree_irregularity_columns %in% names(null_metrics)))
+stopifnot("diameter" %in% names(null_metrics))
+null_edge_multiplicity <- compute_edge_multiplicity_for_networks(
+  simulation$networks
+)
+
+degree_rows <- lapply(seq_along(simulation$networks), function(i) {
+  B <- simulation$networks[[i]]
+  projection <- crossprod(B)
+  diag(projection) <- 0
+  graph <- graph_from_adjacency_matrix(
+    1L * (projection > 0), mode = "undirected", diag = FALSE
+  )
+  list(
+    unipartite = data.frame(
+      network_id = names(simulation$networks)[i],
+      degree = as.integer(degree(graph))
+    ),
+    trial = data.frame(
+      network_id = names(simulation$networks)[i],
+      degree = as.integer(rowSums(B))
+    ),
+    treatment = data.frame(
+      network_id = names(simulation$networks)[i],
+      degree = as.integer(colSums(B))
+    )
+  )
+})
+null_degrees <- list(
+  unipartite = bind_rows(lapply(degree_rows, `[[`, "unipartite")),
+  trial = bind_rows(lapply(degree_rows, `[[`, "trial")),
+  treatment = bind_rows(lapply(degree_rows, `[[`, "treatment"))
+)
+null_degrees$counts <- lapply(null_degrees, function(data) {
+  data |> filter(degree > 0) |> count(degree, name = "count")
+})
+
+# Maximum-likelihood fit for the shifted geometric trial-degree distribution
+# P(K = k) = (1 - theta) * theta^(k - k_min), k >= k_min.
+null_trial_vector <- null_degrees$trial$degree
+null_trial_vector <- null_trial_vector[
+  is.finite(null_trial_vector) & null_trial_vector > 0
+]
+null_trial_k_min <- min(null_trial_vector)
+null_trial_excess <- null_trial_vector - null_trial_k_min
+null_trial_theta <-
+  sum(null_trial_excess) /
+  (length(null_trial_excess) + sum(null_trial_excess))
+null_trial_geometric_fit <- list(
+  theta = null_trial_theta,
+  k_min = null_trial_k_min,
+  n = length(null_trial_vector),
+  line = data.frame(
+    degree = seq.int(null_trial_k_min, max(null_trial_vector))
+  ) |>
+    mutate(
+      count = length(null_trial_vector) *
+        (1 - null_trial_theta) *
+        null_trial_theta^(degree - null_trial_k_min)
+    )
+)
+
+saveRDS(null_metrics, file.path(result_dir, "null_metrics.rds"))
+saveRDS(
+  null_edge_multiplicity,
+  file.path(result_dir, "null_edge_multiplicity.rds")
+)
+saveRDS(null_degrees, file.path(result_dir, "null_degrees.rds"))
+saveRDS(
+  null_trial_geometric_fit,
+  file.path(result_dir, "null_trial_geometric_fit.rds")
+)
+saveRDS(simulation$summary, file.path(result_dir, "null_MNS.rds"))
+write.csv(null_metrics, file.path(result_dir, "null_metrics.csv"), row.names = FALSE)
+write.csv(
+  null_edge_multiplicity,
+  file.path(result_dir, "null_edge_multiplicity.csv"),
+  row.names = FALSE
+)
+write.csv(simulation$summary, file.path(result_dir, "null_MNS.csv"), row.names = FALSE)
+write.csv(null_degrees$counts$unipartite, file.path(result_dir, "degree_unipartite.csv"), row.names = FALSE)
+write.csv(null_degrees$counts$trial, file.path(result_dir, "degree_bipartite_trial.csv"), row.names = FALSE)
+write.csv(null_degrees$counts$treatment, file.path(result_dir, "degree_bipartite_treatment.csv"), row.names = FALSE)
+write.csv(
+  data.frame(
+    theta = null_trial_geometric_fit$theta,
+    k_min = null_trial_geometric_fit$k_min,
+    n = null_trial_geometric_fit$n
+  ),
+  file.path(result_dir, "null_trial_geometric_fit.csv"),
+  row.names = FALSE
+)
+
+cat("Sampled networks with saved metrics:", nrow(null_metrics), "\n")
+```
+
+## Fitted-line parameters for the comparison report
+
+The regression parameters are prepared here so the comparison report can load
+the saved table directly.
+
+```{r save-fitted-line-parameters}
+fit_input <- bind_rows(
+  null_metrics |> mutate(Data = "Null Model"),
+  empirical_metrics |> mutate(Data = "Database")
+)
+
+fit_specs <- tribble(
+  ~Metric, ~Network, ~variable, ~label, ~bipartite, ~log_y,
+  "Density", "Unipartite", "density", "Network density (Unipartite)", FALSE, TRUE,
+  "Density", "Bipartite", "bi_density", "Network density (Bipartite)", TRUE, TRUE,
+  "Average path length", "Unipartite", "avg_path_length", "Average path length (Unipartite)", FALSE, FALSE,
+  "Average path length", "Bipartite", "bi_apl", "Average path length (Bipartite)", TRUE, FALSE,
+  "Diameter", "Unipartite", "diameter", "Diameter (Unipartite)", FALSE, FALSE,
+  "Clustering coefficient", "Unipartite", "unipartite_c", "Clustering coefficient (Unipartite)", FALSE, FALSE,
+  "Clustering coefficient", "Bipartite", "bipartite_c", "Clustering coefficient (Bipartite)", TRUE, FALSE,
+  "Degree assortativity", "Unipartite", "assortativity", "Degree assortativity (Unipartite)", FALSE, FALSE,
+  "Degree assortativity", "Bipartite", "bi_assortativity", "Bipartite degree assortativity (trial-treatment)", TRUE, FALSE,
+  "Degree irregularity", "Unipartite", "deg_irreg", "Degree irregularity (Unipartite)", FALSE, TRUE,
+  "Trial-degree irregularity", "Bipartite", "bi_trial_deg_irreg", "Trial-degree irregularity (Bipartite)", TRUE, TRUE,
+  "Treatment-degree irregularity", "Bipartite", "bi_treatment_deg_irreg", "Treatment-degree irregularity (Bipartite)", TRUE, TRUE
+)
+
+fit_one_line <- function(specification, predictor, x_axis) {
+  model_data <- fit_input |>
+    filter(
+      is.finite(.data[[specification$variable]]),
+      is.finite(.data[[predictor]]),
+      .data[[predictor]] > 0
+    )
+  if (specification$log_y) {
+    model_data <- model_data |> filter(.data[[specification$variable]] > 0)
+  }
+  model_data |>
+    group_by(Data) |>
+    group_modify(function(data, key) {
+      x_fit <- log10(data[[predictor]])
+      y_fit <- if (specification$log_y) {
+        log10(data[[specification$variable]])
+      } else {
+        data[[specification$variable]]
+      }
+      model <- lm(y_fit ~ x_fit)
+      tibble(
+        Metric = specification$Metric,
+        Network = specification$Network,
+        `X-axis` = x_axis,
+        `Y-axis` = if (specification$log_y) {
+          paste0("log10(", specification$label, ")")
+        } else specification$label,
+        Slope = unname(coef(model)[2]),
+        Intercept = unname(coef(model)[1]),
+        `R-squared` = summary(model)$r.squared
+      )
+    }) |>
+    ungroup()
+}
+
+fit_rows <- list()
+fit_index <- 0L
+for (i in seq_len(nrow(fit_specs))) {
+  predictors <- if (fit_specs$bipartite[i]) {
+    c(N = "N_treatments", M = "N_total_trials")
+  } else c(N = "N_treatments")
+  for (x_axis in names(predictors)) {
+    fit_index <- fit_index + 1L
+    fit_rows[[fit_index]] <- fit_one_line(
+      fit_specs[i, ], predictors[[x_axis]], x_axis
+    )
+  }
+}
+
+fitted_line_parameters <- bind_rows(fit_rows) |>
+  pivot_wider(
+    id_cols = c(Metric, Network, `X-axis`, `Y-axis`),
+    names_from = Data,
+    values_from = c(Slope, Intercept, `R-squared`),
+    names_glue = "{Data} { .value}"
+  ) |>
+  select(
+    Metric, Network, `X-axis`, `Y-axis`,
+    `Database Slope`, `Database Intercept`, `Database R-squared`,
+    `Null Model Slope`, `Null Model Intercept`, `Null Model R-squared`
+  )
+
+saveRDS(
+  fitted_line_parameters,
+  file.path(result_dir, "fitted_line_parameters.rds")
+)
+write.csv(
+  fitted_line_parameters,
+  file.path(result_dir, "fitted_line_parameters.csv"),
+  row.names = FALSE
+)
+```

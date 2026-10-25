@@ -1,0 +1,121 @@
+"N","rewiring_target","mean_edges_rewired","qualified_networks"
+4,"Total",3.66386554621849,119
+4,"Fix trial degree",3.65546218487395,119
+4,"Fix treatment degree",0.00840336134453781,119
+4,"Connect components",0,119
+5,"Total",5.09090909090909,88
+5,"Fix trial degree",5.05681818181818,88
+5,"Fix treatment degree",0.0340909090909091,88
+5,"Connect components",0,88
+6,"Total",6.86607142857143,112
+6,"Fix trial degree",6.70535714285714,112
+6,"Fix treatment degree",0.107142857142857,112
+6,"Connect components",0.0535714285714286,112
+7,"Total",9.16326530612245,147
+7,"Fix trial degree",9,147
+7,"Fix treatment degree",0.108843537414966,147
+7,"Connect components",0.054421768707483,147
+8,"Total",9.9047619047619,84
+8,"Fix trial degree",9.63095238095238,84
+8,"Fix treatment degree",0.130952380952381,84
+8,"Connect components",0.142857142857143,84
+9,"Total",10.6964285714286,56
+9,"Fix trial degree",10.4642857142857,56
+9,"Fix treatment degree",0.196428571428571,56
+9,"Connect components",0.0357142857142857,56
+10,"Total",14.1739130434783,46
+10,"Fix trial degree",14.0652173913043,46
+10,"Fix treatment degree",0.0652173913043478,46
+10,"Connect components",0.0434782608695652,46
+11,"Total",13.5531914893617,47
+11,"Fix trial degree",13.2127659574468,47
+11,"Fix treatment degree",0.170212765957447,47
+11,"Connect components",0.170212765957447,47
+12,"Total",14.6486486486486,37
+12,"Fix trial degree",14.3243243243243,37
+12,"Fix treatment degree",0.162162162162162,37
+12,"Connect components",0.162162162162162,37
+13,"Total",16.7037037037037,54
+13,"Fix trial degree",16.3148148148148,54
+13,"Fix treatment degree",0.240740740740741,54
+13,"Connect components",0.148148148148148,54
+14,"Total",16.5,26
+14,"Fix trial degree",15.8846153846154,26
+14,"Fix treatment degree",0.384615384615385,26
+14,"Connect components",0.230769230769231,26
+15,"Total",18,21
+15,"Fix trial degree",17.8095238095238,21
+15,"Fix treatment degree",0.19047619047619,21
+15,"Connect components",0,21
+16,"Total",28.4583333333333,24
+16,"Fix trial degree",28.2083333333333,24
+16,"Fix treatment degree",0.0833333333333333,24
+16,"Connect components",0.166666666666667,24
+17,"Total",21.7307692307692,26
+17,"Fix trial degree",21.1538461538462,26
+17,"Fix treatment degree",0.346153846153846,26
+17,"Connect components",0.230769230769231,26
+18,"Total",14.3,20
+18,"Fix trial degree",13.7,20
+18,"Fix treatment degree",0.3,20
+18,"Connect components",0.3,20
+19,"Total",24.5555555555556,18
+19,"Fix trial degree",24.3333333333333,18
+19,"Fix treatment degree",0.111111111111111,18
+19,"Connect components",0.111111111111111,18
+20,"Total",30.5833333333333,12
+20,"Fix trial degree",30.4166666666667,12
+20,"Fix treatment degree",0.166666666666667,12
+20,"Connect components",0,12
+21,"Total",55,1
+21,"Fix trial degree",55,1
+21,"Fix treatment degree",0,1
+21,"Connect components",0,1
+22,"Total",39.6,10
+22,"Fix trial degree",39.2,10
+22,"Fix treatment degree",0.4,10
+22,"Connect components",0,10
+23,"Total",19.8181818181818,11
+23,"Fix trial degree",19.5454545454545,11
+23,"Fix treatment degree",0.272727272727273,11
+23,"Connect components",0,11
+24,"Total",26.7777777777778,9
+24,"Fix trial degree",24.7777777777778,9
+24,"Fix treatment degree",1.11111111111111,9
+24,"Connect components",0.888888888888889,9
+25,"Total",19,7
+25,"Fix trial degree",17.8571428571429,7
+25,"Fix treatment degree",0.571428571428571,7
+25,"Connect components",0.571428571428571,7
+26,"Total",25.7142857142857,7
+26,"Fix trial degree",25.1428571428571,7
+26,"Fix treatment degree",0.571428571428571,7
+26,"Connect components",0,7
+28,"Total",16,1
+28,"Fix trial degree",15,1
+28,"Fix treatment degree",1,1
+28,"Connect components",0,1
+32,"Total",20,2
+32,"Fix trial degree",13,2
+32,"Fix treatment degree",4,2
+32,"Connect components",3,2
+34,"Total",22,1
+34,"Fix trial degree",22,1
+34,"Fix treatment degree",0,1
+34,"Connect components",0,1
+38,"Total",52,4
+38,"Fix trial degree",52,4
+38,"Fix treatment degree",0,4
+38,"Connect components",0,4
+49,"Total",30.5,2
+49,"Fix trial degree",15,2
+49,"Fix treatment degree",9.5,2
+49,"Connect components",6,2
+50,"Total",26.5,4
+50,"Fix trial degree",24.5,4
+50,"Fix treatment degree",1.5,4
+50,"Connect components",0.5,4
+55,"Total",39.25,4
+55,"Fix trial degree",37,4
+55,"Fix treatment degree",1.75,4
+55,"Connect components",0.5,4

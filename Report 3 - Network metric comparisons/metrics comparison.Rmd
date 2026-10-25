@@ -1,0 +1,2096 @@
+---
+title: "Empirical and Null-Model Metrics Comparison"
+author: "Xinrui Shi"
+date: "2026-08-04"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+
+input_dir <- dirname(knitr::current_input(dir = TRUE))
+report_dir <- if (file.exists(file.path(input_dir, "NMA network structure analysis.Rproj"))) {
+  input_dir
+} else {
+  normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+}
+empirical_result_dir <- file.path(report_dir, "Empirical data", "results")
+null_result_dir <- file.path(report_dir, "Simulated data", "results")
+result_dir <- file.path(report_dir, "Report 3 - Network metric comparisons", "results")
+dir.create(result_dir, recursive = TRUE, showWarnings = FALSE)
+
+# This report intentionally sources no simulation or metric-computation file.
+# It only reads results produced by empirical_database.Rmd and
+# null_model_sample.Rmd.
+required_files <- c(
+  empirical_metrics = file.path(empirical_result_dir, "empirical_metrics.rds"),
+  empirical_degrees = file.path(empirical_result_dir, "empirical_degrees.rds"),
+  empirical_edge_multiplicity = file.path(
+    empirical_result_dir, "empirical_edge_multiplicity.rds"
+  ),
+  empirical_trial_fit = file.path(empirical_result_dir, "empirical_trial_geometric_fit.rds"),
+  null_metrics = file.path(null_result_dir, "null_metrics.rds"),
+  null_degrees = file.path(null_result_dir, "null_degrees.rds"),
+  null_edge_multiplicity = file.path(
+    null_result_dir, "null_edge_multiplicity.rds"
+  ),
+  null_trial_fit = file.path(null_result_dir, "null_trial_geometric_fit.rds"),
+  fitted_lines = file.path(null_result_dir, "fitted_line_parameters.rds")
+)
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0L) {
+  stop(
+    "Run empirical_database.Rmd and null_model_sample.Rmd first. Missing: ",
+    paste(missing_files, collapse = ", ")
+  )
+}
+
+empirical_metrics <- readRDS(required_files[["empirical_metrics"]])
+empirical_degrees <- readRDS(required_files[["empirical_degrees"]])
+empirical_edge_multiplicity <- readRDS(
+  required_files[["empirical_edge_multiplicity"]]
+)
+empirical_trial_fit <- readRDS(required_files[["empirical_trial_fit"]])
+null_metrics <- readRDS(required_files[["null_metrics"]])
+null_degrees <- readRDS(required_files[["null_degrees"]])
+null_edge_multiplicity <- readRDS(required_files[["null_edge_multiplicity"]])
+null_trial_fit <- readRDS(required_files[["null_trial_fit"]])
+fitted_line_parameters <- readRDS(required_files[["fitted_lines"]])
+
+empirical_legend_label <- "Empirical"
+simulated_legend_label <- "Simulated"
+comparison_labels <- c(
+  "Null Model" = simulated_legend_label,
+  "Database" = empirical_legend_label
+)
+comparison_colors <- c("Null Model" = "grey60", "Database" = "#0072B2")
+degree_fit_colors <- c("Null Model" = "grey10", "Database" = "#0049f2")
+comparison_data <- bind_rows(
+  null_metrics |> mutate(Data = "Null Model"),
+  empirical_metrics |> mutate(Data = "Database")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+required_mean_degree_columns <- c(
+  "mean_bipartite_trial_degree",
+  "mean_bipartite_treatment_degree",
+  "mean_unipartite_weighted_degree",
+  "bi_trial_deg_irreg",
+  "bi_treatment_deg_irreg"
+)
+missing_mean_degree_columns <- setdiff(
+  required_mean_degree_columns, names(comparison_data)
+)
+if (length(missing_mean_degree_columns) > 0L) {
+  stop(
+    "Run empirical_database.Rmd and null_model_sample.Rmd again. Missing ",
+    "mean-degree metrics: ", paste(missing_mean_degree_columns, collapse = ", ")
+  )
+}
+if (!"diameter" %in% names(comparison_data)) {
+  stop(
+    "Run empirical_database.Rmd and null_model_sample.Rmd again. Missing ",
+    "metric: diameter"
+  )
+}
+
+plot_x_label_size <- 11
+plot_y_label_size <- 11
+plot_legend_size <- 12
+comparison_dot_guide <- guide_legend(
+  override.aes = list(shape = 16, size = 4.2, alpha = 1, linetype = 0)
+)
+comparison_filled_dot_guide <- guide_legend(
+  override.aes = list(shape = 21, size = 4.2, alpha = 1,
+                      colour = "grey15")
+)
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title.x = element_text(size = plot_x_label_size),
+    axis.title.y = element_text(size = plot_y_label_size),
+    legend.title = element_text(size = plot_legend_size, face = "bold"),
+    legend.text = element_text(size = plot_legend_size),
+    legend.key.width = grid::unit(0.6, "cm"),
+    legend.key.height = grid::unit(0.6, "cm"),
+    panel.grid.major.x = element_blank()
+  )
+theme_set(plot_theme)
+
+plain_log_labels <- function(x) format(x, scientific = FALSE, trim = TRUE)
+x_label_unipartite_degree <- "Number of other treatments \n compared to each treatment"
+x_label_bipartite_trial_degree <- "Number of arms in the trial"
+x_label_bipartite_treatment_degree <- "Number of trials \n including the treatment"
+
+```
+
+# Network-type comparison
+
+```{r network-type-comparison, fig.width=8, fig.height=4}
+network_type_levels <- c("looped", "star", "tree")
+network_type_labels <- c("Looped", "Star", "Non-star tree")
+
+network_type_data <- bind_rows(
+  null_metrics |> transmute(type, Data = "Null Model"),
+  empirical_metrics |> transmute(type, Data = "Database")
+) |>
+  mutate(
+    Data = factor(Data, levels = names(comparison_colors)),
+    type = factor(type, levels = network_type_levels, labels = network_type_labels)
+  ) |>
+  count(Data, type, name = "Networks", .drop = FALSE)
+
+knitr::kable(
+  network_type_data,
+  align = c("l", "l", "r"),
+  caption = "Network types in the empirical database and null model"
+)
+
+p_network_types <- ggplot(
+  network_type_data,
+  aes(x = type, y = Networks, fill = Data, colour = Data, alpha = Data)
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.68) +
+  scale_fill_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data"
+  ) +
+  scale_colour_manual(values = comparison_colors, guide = "none") +
+  scale_alpha_manual(
+    values = c("Null Model" = 0.9, "Database" = 0.7),
+    guide = "none"
+  ) +
+  labs(x = "Network type", y = "Number of networks") +
+  theme(legend.position = "right")
+p_network_types
+
+```
+
+# Degree-distribution comparison
+
+The layout follows the all-degree-distribution figure in `soft_config_model.Rmd`. Panel (b) shows separate maximum-likelihood shifted-geometric fits for the empirical database and null model. Panels (a) and (c) contain no fitted lines.
+
+```{r degree-distribution-comparison, fig.width=12, fig.height=4}
+degree_comparison <- function(empirical_counts, null_counts) {
+  bind_rows(
+    null_counts |> mutate(Data = "Null Model"),
+    empirical_counts |> mutate(Data = "Database")
+  ) |>
+    filter(is.finite(degree), is.finite(count), degree > 0, count > 0) |>
+    mutate(Data = factor(Data, levels = names(comparison_colors)))
+}
+
+degree_unipartite <- degree_comparison(
+  empirical_degrees$counts$unipartite,
+  null_degrees$counts$unipartite
+)
+degree_trial <- degree_comparison(
+  empirical_degrees$counts$trial,
+  null_degrees$counts$trial
+) |>
+  filter(degree >= 2)
+degree_treatment <- degree_comparison(
+  empirical_degrees$counts$treatment,
+  null_degrees$counts$treatment
+)
+
+degree_point_distribution <- function(data, x_label, y_label, title) {
+  ggplot(
+    data,
+    aes(x = degree, y = count, colour = Data)
+  ) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = comparison_colors, guide = "none") +
+    scale_x_log10() + scale_y_log10(labels = plain_log_labels) +
+    labs(title = title, x = x_label, y = y_label)
+}
+
+p_degree_unipartite <- degree_point_distribution(
+  degree_unipartite,
+  x_label_unipartite_degree,
+  "Number of treatments",
+  "(a)"
+)
+
+trial_degree_levels <- seq.int(
+  min(degree_trial$degree), max(degree_trial$degree)
+)
+degree_trial_bars <- degree_trial |>
+  mutate(degree_factor = factor(degree, levels = trial_degree_levels))
+trial_geometric_lines <- bind_rows(
+  null_trial_fit$line |> mutate(Data = "Null Model"),
+  empirical_trial_fit$line |> mutate(Data = "Database")
+) |>
+  filter(is.finite(count), count >= 1) |>
+  mutate(degree_factor = factor(degree, levels = trial_degree_levels)) |>
+  filter(!is.na(degree_factor)) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_degree_trial <- ggplot(
+  degree_trial_bars,
+  aes(x = degree_factor, y = count, fill = Data, colour = Data, alpha = Data)
+) +
+  geom_col(
+    position = position_dodge(width = 0.8, preserve = "single"),
+    width = 0.72
+  ) +
+  geom_point(
+    aes(colour = Data),
+    position = position_dodge(width = 0.8, preserve = "single"),
+    alpha = 1, size = 2
+  ) +
+  geom_line(
+    data = filter(trial_geometric_lines, Data == "Null Model"),
+    aes(x = degree_factor, y = count, group = Data),
+    inherit.aes = FALSE,
+    colour = degree_fit_colors[["Null Model"]],
+    linetype = "dashed", linewidth = 0.9, alpha = 0.8
+  ) +
+  geom_line(
+    data = filter(trial_geometric_lines, Data == "Database"),
+    aes(x = degree_factor, y = count, group = Data),
+    inherit.aes = FALSE,
+    colour = degree_fit_colors[["Database"]],
+    linetype = "dashed", linewidth = 0.9, alpha = 0.8
+  ) +
+  scale_fill_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data"
+  ) +
+  scale_colour_manual(values = degree_fit_colors, guide = "none") +
+  scale_alpha_manual(
+    values = c("Null Model" = 0.9, "Database" = 0.7),
+    guide = "none"
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(b)", x = x_label_bipartite_trial_degree,
+    y = "Number of trials"
+  )
+
+p_degree_treatment <- degree_point_distribution(
+  degree_treatment,
+  x_label_bipartite_treatment_degree,
+  "Number of treatments",
+  "(c)"
+)
+
+geometric_fit_key <- ggplot() +
+  annotate(
+    "rect", xmin = 0, xmax = 1.1, ymin = 0, ymax = 1,
+    fill = "white", colour = "grey25", linewidth = 0.45
+  ) +
+  annotate(
+    "text", x = 0.5, y = 0.82, label = "Geometric Fit",
+    fontface = "bold", size = 3.2
+  ) +
+  annotate(
+    "segment", x = 0.08, xend = 0.28, y = 0.53, yend = 0.53,
+    colour = degree_fit_colors[["Database"]],
+    linetype = "dashed", linewidth = 0.9, alpha = 0.8
+  ) +
+  annotate(
+    "text", x = 0.34, y = 0.53,
+    label = sprintf("'%s:'~theta==%.2f", empirical_legend_label,
+                    empirical_trial_fit$theta),
+    parse = TRUE, hjust = 0, size = 2.7
+  ) +
+  annotate(
+    "segment", x = 0.08, xend = 0.28, y = 0.25, yend = 0.25,
+    colour = degree_fit_colors[["Null Model"]],
+    linetype = "dashed", linewidth = 0.9, alpha = 0.8
+  ) +
+  annotate(
+    "text", x = 0.34, y = 0.25,
+    label = sprintf("'%s:'~theta==%.2f", simulated_legend_label,
+                    null_trial_fit$theta),
+    parse = TRUE, hjust = 0, size = 2.7
+  ) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), clip = "off") +
+  theme_void()
+
+p_degree_trial <- p_degree_trial + inset_element(
+  geometric_fit_key,
+  left = 0.45, bottom = 0.6, right = 0.99, top = 0.99,
+  align_to = "panel"
+)
+
+p_degree_comparison <- p_degree_unipartite + p_degree_trial + p_degree_treatment +
+  plot_layout(nrow = 1, guides = "collect") & theme(legend.position = "bottom")
+p_degree_comparison
+
+```
+
+
+```{r}
+p_degree_trial <- ggplot(
+  degree_trial_bars,
+  aes(x = degree_factor, y = count, fill = Data, colour = Data, alpha = Data)
+) +
+  geom_col(
+    position = position_dodge(width = 0.8, preserve = "single"),
+    width = 0.72
+  ) +
+  scale_fill_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data"
+  ) +
+  scale_colour_manual(values = degree_fit_colors, guide = "none") +
+  scale_alpha_manual(
+    values = c("Null Model" = 0.9, "Database" = 0.7),
+    guide = "none"
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(a) Trial degree distribution", x = x_label_bipartite_trial_degree,
+    y = "Number of trials"
+  )
+
+p_degree_treatment <- degree_point_distribution(
+  degree_treatment,
+  x_label_bipartite_treatment_degree,
+  "Number of treatments",
+  "(b) Treatment degree distribution")
+
+
+p_deg_comparison <-
+  p_degree_trial + p_degree_treatment + 
+  plot_layout(nrow = 1, widths = c(1, 1.18), guides = "collect") &
+  theme(legend.position = "right")
+
+
+```
+
+```{r echo=FALSE}
+cat("Null model: Number of treatments have fewer than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Null Model"&degree<=2)$count),"\n")
+
+cat("Null model: Proportion of treatments have fewer than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Null Model"&degree<=2)$count)/sum(subset(degree_unipartite, 
+           Data=="Null Model")$count),"\n")
+
+cat("Empirical: Number of treatments have fewer than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Database"&degree<=2)$count),"\n")
+
+cat("Empirical: Proportion of treatments have fewer than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Database"&degree<=2)$count)/sum(subset(degree_unipartite, 
+           Data=="Database")$count),"\n")
+
+cat("Null model: Number of treatments have more than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Null Model"&degree>3)$count),"\n")
+
+cat("Null model: Proportion of treatments have more than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Null Model"&degree>3)$count)/sum(subset(degree_unipartite, 
+           Data=="Null Model")$count),"\n")
+
+cat("Empirical: Number of treatments have more than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Database"&degree>3)$count),"\n")
+
+cat("Empirical: Proportion of treatments have more than 3 degrees:",
+    sum(subset(degree_unipartite, 
+           Data=="Database"&degree>3)$count)/sum(subset(degree_unipartite, 
+           Data=="Database")$count),"\n")
+
+
+```
+
+```{r}
+
+for( i in 1:20){
+  count_null <- subset(degree_treatment, 
+                       Data=="Null Model"&degree==i)$count
+  count_emp <- subset(degree_treatment, 
+                       Data=="Database"&degree==i)$count
+  
+  if(count_null > count_emp){
+    print(i)
+  }
+}
+```
+
+```{r}
+cat("Empirical: maximum treatment degree =",
+    max(subset(degree_treatment, 
+           Data=="Database")$degree),"\n")
+cat("Simulation: maximum treatment degree =",
+    max(subset(degree_treatment, 
+           Data=="Null Model")$degree),"\n")
+```
+
+```{r}
+sum_trial_emp <- sum(subset(degree_trial, Data=="Database")$count)
+sum_trial_sim <- sum(subset(degree_trial, Data=="Null Model")$count)
+
+sum_2arm_emp <- subset(degree_trial, Data=="Database"&degree==2)$count
+sum_2arm_sim <- subset(degree_trial, Data=="Null Model"&degree==2)$count
+
+cat("Empirical: proportion of 2-arm trials = ",
+    sum_2arm_emp / sum_trial_emp, "\n")
+cat("Simulation: proportion of 2-arm trials = ",
+    sum_2arm_sim / sum_trial_sim, "\n")
+```
+
+# Edge multiplicity
+
+The multiplicity of an edge is the number of trials in which the same pair of treatments is compared. Each unordered pair is counted once per network. Panel (b) shows the distribution of the total number of edges per network; each dataset contributes one value for each of its 300 networks.
+
+```{r edge-multiplicity, fig.width=11, fig.height=4}
+required_edge_multiplicity_columns <- c("network_id", "multi", "count")
+for (edge_data_name in c(
+  "empirical_edge_multiplicity", "null_edge_multiplicity"
+)) {
+  missing_edge_columns <- setdiff(
+    required_edge_multiplicity_columns,
+    names(get(edge_data_name))
+  )
+  if (length(missing_edge_columns) > 0L) {
+    stop(
+      edge_data_name, " is missing: ",
+      paste(missing_edge_columns, collapse = ", ")
+    )
+  }
+}
+
+edge_multiplicity_comparison <- bind_rows(
+  null_edge_multiplicity |>
+    transmute(multi, count, Data = "Null Model"),
+  empirical_edge_multiplicity |>
+    transmute(multi, count, Data = "Database")
+) |>
+  filter(
+    is.finite(multi), is.finite(count),
+    multi >= 1, count > 0
+  ) |>
+  group_by(Data, multi) |>
+  summarise(count = sum(count), .groups = "drop") |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_edge_multiplicity <- ggplot(
+  edge_multiplicity_comparison,
+  aes(x = multi, y = count, colour = Data)
+) +
+  geom_point(size = 1.8) +
+  scale_x_log10() +
+  scale_y_log10(labels = plain_log_labels) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    x = "Edge multiplicity",
+    y = "Number of unipartite edges"
+  )
+
+edge_counts_per_network <- bind_rows(
+  null_edge_multiplicity |>
+    group_by(network_id) |>
+    summarise(number_of_edges = sum(count), .groups = "drop") |>
+    mutate(Data = "Null Model"),
+  empirical_edge_multiplicity |>
+    group_by(network_id) |>
+    summarise(number_of_edges = sum(count), .groups = "drop") |>
+    mutate(Data = "Database")
+)
+
+if (any(count(edge_counts_per_network, Data)$n != 300L)) {
+  stop("Expected 300 edge-count values for each dataset.")
+}
+
+edge_counts_per_network <- edge_counts_per_network |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_edge_count_distribution <- ggplot() +
+  geom_histogram(
+    data = filter(edge_counts_per_network, Data == "Null Model"),
+    aes(x = number_of_edges, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.90,
+    binwidth = 10, boundary = 0,
+    position = "identity",
+    show.legend = FALSE
+  ) +
+  geom_histogram(
+    data = filter(edge_counts_per_network, Data == "Database"),
+    aes(x = number_of_edges, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.70,
+    binwidth = 10, boundary = 0,
+    position = "identity",
+    show.legend = FALSE
+  ) +
+  scale_fill_manual(values = comparison_colors, labels = comparison_labels) +
+  labs(
+    x = "Number of unipartite edges",
+    y = "Number of networks"
+  )
+
+p_edge_multiplicity_comparison <-
+  (p_edge_multiplicity + labs(title = "(a)")) +
+  (p_edge_count_distribution + labs(title = "(b)")) +
+  plot_layout(nrow = 1, widths = c(1, 1.18), guides = "collect") &
+  theme(legend.position = "right")
+
+p_edge_multiplicity_comparison
+
+
+```
+
+## Number of distinct treatment pairs
+
+This standalone version of panel (b) shows the exact number of networks at each observed number of distinct treatment pairs. It is displayed in the report but is not saved as a separate file.
+
+```{r distinct-pair-count-scatter, fig.width=7, fig.height=5}
+distinct_pair_count_distribution <- edge_counts_per_network |>
+  count(Data, number_of_edges, name = "count") |>
+  filter(number_of_edges > 0, count > 0)
+
+p_distinct_pair_count <- ggplot(
+  distinct_pair_count_distribution,
+  aes(x = number_of_edges, y = count, colour = Data)
+) +
+  geom_point(size = 1.8) +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    x = "Number of distinct treatment pairs",
+    y = "Number of networks"
+  ) +
+  theme(legend.position = "right")
+
+p_distinct_pair_count
+```
+
+```{r}
+total_edge_emp <- sum(subset(edge_multiplicity_comparison, Data=="Database")$count)
+cat("Total number of treatment-pair edge in empirical data:",
+    total_edge_emp ,"\n")
+cat("maximal multiplicity in empirical data:",
+    max(subset(edge_multiplicity_comparison, Data=="Database")$multi),"\n")
+
+emp_multi_below5 <-sum(subset(edge_multiplicity_comparison, Data=="Database"&multi<5)$count)
+cat("proportion of multiplicity<5 in empirical data:",
+    emp_multi_below5/total_edge_emp ,"\n")
+
+total_edge_sim <- sum(subset(edge_multiplicity_comparison, Data=="Null Model")$count)
+cat("Total number of treatment-pair edge in simulated data:",
+    total_edge_sim,"\n")
+
+cat("maximal multiplicity in simulated data:",
+    max(subset(edge_multiplicity_comparison, Data=="Null Model")$multi),"\n")
+
+sim_multi_below5 <-sum(subset(edge_multiplicity_comparison, Data=="Null Model"&multi<5)$count)
+cat("proportion of multiplicity<5 in simulated data:",
+    sim_multi_below5/total_edge_sim ,"\n")
+
+cat("Number of empirical networks having distinct pairs <=10:",
+    nrow(subset(edge_counts_per_network,
+               Data=="Database"&number_of_edges<=10)),
+    "\n")
+
+cat("Number of empirical networks having distinct pairs 10< x <=20:",
+    nrow(subset(edge_counts_per_network,
+               Data=="Database"&number_of_edges>10&number_of_edges<=20)),
+    "\n")
+
+cat("empirical networks: maximum distinct pairs:",
+    max(subset(edge_counts_per_network,
+               Data=="Database")$number_of_edges),
+    "\n")
+
+cat("Number of null model  networks having distinct pairs <=10:",
+    nrow(subset(edge_counts_per_network,
+               Data=="Null Model"&number_of_edges<=10)),
+    "\n")
+
+cat("Number of null model  networks having distinct pairs 10< x <=20:",
+    nrow(subset(edge_counts_per_network,
+               Data=="Null Model"&number_of_edges>10&number_of_edges<=20)),
+    "\n")
+
+cat("null model networks: maximum distinct pairs:",
+    max(subset(edge_counts_per_network,
+               Data=="Null Model")$number_of_edges),
+    "\n")
+```
+
+```{r metric-plot-helpers, include=FALSE}
+metric_histogram <- function(metric, label, binwidth, boundary = 0) {
+  ggplot() +
+    geom_histogram(
+      data = filter(comparison_data, Data == "Null Model", is.finite(.data[[metric]])),
+      aes(x = .data[[metric]], fill = Data),
+      colour = "grey15", linewidth = 0.25,
+      alpha = 0.90, binwidth = binwidth, boundary = boundary,
+      position = "identity", show.legend = FALSE
+    ) +
+    geom_histogram(
+      data = filter(comparison_data, Data == "Database", is.finite(.data[[metric]])),
+      aes(x = .data[[metric]], fill = Data),
+      colour = "grey15", linewidth = 0.25,
+      alpha = 0.70, binwidth = binwidth, boundary = boundary,
+      position = "identity", show.legend = FALSE
+    ) +
+    scale_fill_manual(values = comparison_colors, labels = comparison_labels) +
+    labs(x = label, y = "Number of networks")
+}
+
+metric_scatter <- function(metric, predictor, metric_label, predictor_label,
+                           log_y = FALSE,log_x = TRUE, fitted_line = TRUE) {
+  plot_data <- comparison_data |>
+    filter(
+      is.finite(.data[[metric]]), is.finite(.data[[predictor]]),
+      .data[[predictor]] > 0
+    )
+  if (log_y) plot_data <- plot_data |> filter(.data[[metric]] > 0)
+
+  plot <- ggplot() +
+    geom_count(
+      data = filter(plot_data, Data == "Null Model"),
+      aes(x = .data[[predictor]], y = .data[[metric]], fill = Data,
+          size = after_stat(n)),
+      shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.90
+    ) +
+    geom_count(
+      data = filter(plot_data, Data == "Database"),
+      aes(x = .data[[predictor]], y = .data[[metric]], fill = Data,
+          size = after_stat(n)),
+      shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.70
+    ) +
+    scale_fill_manual(
+      values = comparison_colors, labels = comparison_labels, name = "Data",
+      guide = comparison_filled_dot_guide
+    ) +
+    scale_colour_manual(values = comparison_colors, guide = "none") +
+    scale_size_area(
+      max_size = 8, limits = c(1, 24), breaks = c(1, 5, 10, 15, 20),
+      oob = scales::squish, name = "Count"
+    ) +
+    labs(x = predictor_label, y = metric_label)
+  if (fitted_line) {
+    plot <- plot +
+      geom_smooth(
+        data = filter(plot_data, Data == "Null Model"),
+        aes(x = .data[[predictor]], y = .data[[metric]], colour = Data),
+        method = "lm", formula = y ~ x, se = FALSE,
+        alpha = 0.90, show.legend = FALSE
+      ) +
+      geom_smooth(
+        data = filter(plot_data, Data == "Database"),
+        aes(x = .data[[predictor]], y = .data[[metric]], colour = Data),
+        method = "lm", formula = y ~ x, se = FALSE,
+        alpha = 0.70, show.legend = FALSE
+      )
+  }
+  if (log_y) plot <- plot + scale_y_log10()
+  if (log_x) plot <- plot + scale_x_log10()
+  plot
+}
+
+make_metric_figure <- function(metric, label, binwidth, bipartite, log_y,
+                               fitted_line = TRUE, histogram_boundary = 0) {
+  histogram <- metric_histogram(
+    metric, label, binwidth, boundary = histogram_boundary
+  ) + labs(title = "(a)")
+  versus_N <- metric_scatter(
+    metric, "N_treatments", label, "Number of treatments",
+    log_y = log_y, fitted_line = fitted_line
+  ) + labs(title = "(b)")
+  if (!bipartite) {
+    return(
+      histogram + versus_N + plot_layout(widths = c(1, 1.18)) &
+        theme(legend.position = "right")
+    )
+  }
+  versus_M <- metric_scatter(
+    metric, "N_total_trials", label, "Number of trials",
+    log_y = log_y, fitted_line = fitted_line
+  ) + labs(title = "(c)")
+  histogram + versus_N + versus_M +
+    plot_layout(nrow = 1, guides = "collect") & theme(legend.position = "bottom")
+}
+
+metric_numerics <- function(metric) {
+  comparison_data |>
+    filter(is.finite(.data[[metric]])) |>
+    group_by(Data) |>
+    summarise(
+      Networks = n(), Minimum = min(.data[[metric]]),
+      Mean = mean(.data[[metric]]), Maximum = max(.data[[metric]]),
+      .groups = "drop"
+    )
+}
+```
+
+# Density
+
+## Unipartite
+
+```{r density-unipartite, fig.width=12, fig.height=4}
+p_density <- make_metric_figure(
+  "density", "Network density (Unipartite)", 0.05, FALSE, TRUE
+)
+p_density
+
+knitr::kable(metric_numerics("density"), digits = 3)
+```
+
+```{r}
+
+cat("Proporton of empirical networks having density>0.5:",
+    nrow(subset(comparison_data,Data == "Database"&density>0.5))/300,
+    "\n")
+
+cat("Number of empirical networks having density 1:",
+    nrow(subset(comparison_data,Data == "Database"&density==1)),
+    "\n")
+
+cat("Number of simulated networks having density 1:",
+    nrow(subset(comparison_data,Data == "Null Model"&density==1)),
+    "\n")
+
+#subset(comparison_data,Data == "Database"&0.45<density&density <=0.5)
+density_N_slope <- fitted_line_parameters |>
+  filter(
+    Metric == "Density",
+    Network == "Unipartite",
+    `X-axis` == "N"
+  ) |>
+  pull(`Database Slope`)
+
+
+uni_density_doubling_reduction <- 100 * (1 - 2^density_N_slope)
+cat(sprintf(
+  paste0(
+    "Doubling the number of treatments is associated with an approximately ",
+    "%.2g%% reduction in unipartite density.\n"
+  ),
+  uni_density_doubling_reduction
+))
+
+
+
+```
+
+## Bipartite
+
+```{r density-bipartite, fig.width=12, fig.height=5}
+p_bi_density <- make_metric_figure(
+  "bi_density", "Network density (Bipartite)", 0.05, TRUE, TRUE
+)
+p_bi_density
+
+knitr::kable(metric_numerics("bi_density"), digits = 3)
+
+bi_density_N_slope <- fitted_line_parameters |>
+  filter(
+    Metric == "Density",
+    Network == "Bipartite",
+    `X-axis` == "N"
+  ) |>
+  pull(`Database Slope`)
+
+bi_density_doubling_reduction <- 100 * (1 - 2^bi_density_N_slope)
+cat(sprintf(
+  paste0(
+    "Doubling the number of treatments is associated with an approximately ",
+    "%.2g%% reduction in bipartite density.\n"
+  ),
+  bi_density_doubling_reduction
+))
+
+bi_density_M_slope <- fitted_line_parameters |>
+  filter(
+    Metric == "Density",
+    Network == "Bipartite",
+    `X-axis` == "M"
+  ) |>
+  pull(`Database Slope`)
+
+bi_density_doubling_M_reduction <- 100 * (1 - 2^bi_density_M_slope)
+cat(sprintf(
+  paste0(
+    "Doubling the number of trials is associated with an approximately ",
+    "%.2g%% reduction in bipartite density.\n"
+  ),
+  bi_density_doubling_M_reduction
+))
+```
+
+# Average path length
+
+## Unipartite
+
+```{r apl-unipartite, fig.width=12, fig.height=4}
+p_apl <- make_metric_figure(
+  "avg_path_length", "Average path length (Unipartite)", 0.1, FALSE, FALSE
+)
+p_apl
+
+knitr::kable(metric_numerics("avg_path_length"), digits = 3)
+```
+
+```{r}
+apl_N_slope <- fitted_line_parameters |>
+  filter(
+    Metric == "Average path length",
+    Network == "Unipartite",
+    `X-axis` == "N"
+  ) |>
+  pull(`Database Slope`)
+
+
+uni_apl_doubling_increase <- apl_N_slope*log10(2)
+cat(sprintf(
+  paste0(
+    "Doubling the number of treatments is associated with an approximately ",
+    "%.2g increase in unipartite APL.\n"
+  ),
+  uni_apl_doubling_increase
+))
+
+```
+
+## Unipartite diameter
+
+Diameter is the maximum shortest-path distance between any two treatments in
+the connected unipartite network.
+```{r}
+subset(empirical_metrics, diameter==8)
+```
+
+```{r diameter-unipartite, fig.width=12, fig.height=4}
+diameter_levels <- seq.int(
+  min(comparison_data$diameter, na.rm = TRUE),
+  max(comparison_data$diameter, na.rm = TRUE)
+)
+diameter_bar_data <- comparison_data |>
+  filter(is.finite(diameter)) |>
+  transmute(
+    Data = factor(
+      as.character(Data), levels = c("Database", "Null Model")
+    ),
+    diameter = as.integer(diameter)
+  ) |>
+  count(Data, diameter, name = "Networks") |>
+  complete(Data, diameter = diameter_levels, fill = list(Networks = 0L)) |>
+  mutate(diameter = factor(diameter, levels = diameter_levels))
+
+p_diameter_bar <- ggplot(
+  diameter_bar_data,
+  aes(x = diameter, y = Networks, fill = Data)
+) +
+  geom_col(
+    position = position_dodge2(
+      width = 0.9, preserve = "single", padding = 0.08
+    ),
+    width = 0.9, colour = "grey15", linewidth = 0.25
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_fill_manual(
+    values = comparison_colors,
+    breaks = c("Database", "Null Model"),
+    labels = comparison_labels,
+    name = "Data"
+  ) +
+  labs(x = "Diameter (Unipartite)", y = "Number of networks") +
+  theme(legend.position = "right")
+
+diameter_apl_data <- comparison_data |>
+  filter(is.finite(avg_path_length), is.finite(diameter)) |>
+  mutate(
+    Data = factor(
+      as.character(Data), levels = c("Database", "Null Model")
+    )
+  )
+
+p_diameter_apl <- ggplot(
+  diameter_apl_data,
+  aes(
+    x = avg_path_length, y = diameter, fill = Data,
+    size = after_stat(n)
+  )
+) +
+  geom_count(
+    position = position_jitter(width = 0.008, height = 0, seed = 20260827),
+    shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.8
+  ) +
+  scale_fill_manual(
+    values = comparison_colors,
+    breaks = c("Database", "Null Model"),
+    labels = comparison_labels,
+    name = "Data", guide = "none"
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 24), breaks = c(1, 5, 10, 15, 20),
+    oob = scales::squish, name = "Count"
+  ) +
+  labs(
+    x = "Average path length (Unipartite)",
+    y = "Diameter (Unipartite)"
+  )
+
+p_diameter <-
+  (p_diameter_bar + labs(title = "(a)")) +
+  (p_diameter_apl + labs(title = "(b)")) +
+  plot_layout(widths = c(1, 1.18), guides = "collect") &
+  theme(legend.position = "right")
+
+p_diameter
+
+knitr::kable(metric_numerics("diameter"), digits = 3)
+```
+
+## Bipartite
+
+```{r apl-bipartite, fig.width=12, fig.height=5}
+p_bi_apl <- make_metric_figure(
+  "bi_apl", "Average path length (Bipartite)", 0.2, TRUE, TRUE
+)
+p_bi_apl
+
+knitr::kable(metric_numerics("bi_apl"), digits = 3)
+```
+
+
+
+# Clustering coefficient
+
+## Unipartite
+
+```{r clustering-unipartite, fig.width=12, fig.height=4}
+p_clustering <- make_metric_figure(
+  "unipartite_c", "Clustering coefficient (Unipartite)", 0.05, FALSE, FALSE
+)
+p_clustering
+
+
+clustering_density_ratio_data <- comparison_data |>
+  filter(
+    is.finite(unipartite_c),
+    is.finite(density),
+    density > 0
+  ) |>
+  mutate(clustering_density_ratio = unipartite_c / density)
+
+p_clustering_density_ratio <- ggplot() +
+  geom_histogram(
+    data = filter(clustering_density_ratio_data, Data == "Null Model"),
+    aes(x = clustering_density_ratio, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.90, binwidth = 0.2, boundary = 0,
+    position = "identity", show.legend = FALSE
+  ) +
+  geom_histogram(
+    data = filter(clustering_density_ratio_data, Data == "Database"),
+    aes(x = clustering_density_ratio, fill = Data),
+    colour = "grey15", linewidth = 0.25,
+    alpha = 0.70, binwidth = 0.2, boundary = 0,
+    position = "identity", show.legend = FALSE
+  ) +
+  scale_fill_manual(values = comparison_colors, labels = comparison_labels) +
+  labs(
+    title = "(c)",
+    x = paste0(
+      "Ratio of clustering coefficient to density"
+    ),
+    y = "Number of networks"
+  )
+
+p_clustering_with_ratio <-
+  p_clustering + p_clustering_density_ratio +
+  plot_layout(nrow = 1, widths = c(1, 1.18, 1), guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_clustering_with_ratio
+
+
+# Optional panel (c): use a box-and-whisker plot instead of the ratio histogram.
+p_clustering_density_ratio_boxplot <- ggplot(
+  clustering_density_ratio_data,
+  aes(x = clustering_density_ratio, y = Data, fill = Data)
+) +
+  geom_boxplot(
+    width = 0.55, colour = "grey15", linewidth = 0.45,
+    alpha = 0.80, outlier.shape = 21, outlier.size = 2,
+    outlier.stroke = 0.35
+  ) +
+  scale_fill_manual(values = comparison_colors, guide = "none") +
+  scale_y_discrete(labels = comparison_labels) +
+  labs(
+    title = "(c)",
+    x = "Ratio of clustering coefficient to density",
+    y = NULL
+  )
+
+p_clustering_with_ratio_boxplot <-
+  p_clustering + p_clustering_density_ratio_boxplot +
+  plot_layout(nrow = 1, widths = c(1, 1.18, 1), guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_clustering_with_ratio_boxplot
+
+knitr::kable(metric_numerics("unipartite_c"), digits = 3)
+```
+
+```{r}
+subset(comparison_data, Data=="Database"&unipartite_c==0) %>%
+  group_by(type) %>% count()
+```
+
+```{r}
+cat("Number of networks with C=1 in empirical set:",
+    nrow(subset(comparison_data, Data=="Database"&unipartite_c==1)) ,"\n")
+cat("Number of networks with C=1 in simulation set:",
+    nrow(subset(comparison_data, Data=="Null Model"&unipartite_c==1)) ,"\n")
+```
+
+```{r}
+cat("Number of networks with C>0.5 in empirical set:",
+    nrow(subset(comparison_data, Data=="Database"&unipartite_c>0.5)) /300,"\n")
+cat("Number of networks with C=0.5 in simulation set:",
+    nrow(subset(comparison_data, Data=="Null Model"&unipartite_c>0.5)) /300,"\n")
+```
+
+```{r clustering-predictor-regressions, fig.width=12, fig.height=5}
+clustering_predictor_data <- comparison_data |>
+  filter(
+    is.finite(N_treatments), N_treatments > 0,
+    is.finite(unipartite_c)
+  ) |>
+  mutate(
+    inverse_N = 1 / N_treatments,
+    mean_unipartite_degree_over_N =
+      mean_unipartite_unweighted_degree / N_treatments
+  )
+
+fit_clustering_predictor <- function(data, predictor, relationship) {
+  data |>
+    filter(is.finite(.data[[predictor]])) |>
+    group_by(Data) |>
+    group_modify(~ {
+      fit <- lm(
+        reformulate(predictor, response = "unipartite_c"),
+        data = .x
+      )
+      tibble(
+        Relationship = relationship,
+        Intercept = unname(coef(fit)[["(Intercept)"]]),
+        Slope = unname(coef(fit)[[predictor]]),
+        `R-squared` = summary(fit)$r.squared
+      )
+    }) |>
+    ungroup()
+}
+
+p_clustering_inverse_N <- ggplot(
+  clustering_predictor_data,
+  aes(x = inverse_N, y = unipartite_c, colour = Data)
+) +
+  geom_point(size = 2, alpha = 0.75) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    title = "(b)",
+    x = "1 / number of treatments",
+    y = "Clustering coefficient (Unipartite)"
+  )
+
+p_clustering_degree_over_N <- clustering_predictor_data |>
+  filter(is.finite(mean_unipartite_degree_over_N)) |>
+  ggplot(
+    aes(
+      x = mean_unipartite_degree_over_N,
+      y = unipartite_c,
+      colour = Data
+    )
+  ) +
+  geom_point(size = 2, alpha = 0.75) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    title = "(a)",
+    x = "Mean unipartite degree / number of treatments",
+    y = "Clustering coefficient (Unipartite)"
+  )
+
+p_clustering_predictors <-
+  p_clustering_degree_over_N + p_clustering_inverse_N +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+clustering_predictor_fits <- bind_rows(
+  fit_clustering_predictor(
+    clustering_predictor_data,
+    "mean_unipartite_degree_over_N",
+    "(a) Mean unipartite degree / N"
+  ),
+  fit_clustering_predictor(
+    clustering_predictor_data,
+    "inverse_N",
+    "(b) 1 / N"
+  )
+) |>
+  mutate(Data = unname(comparison_labels[as.character(Data)])) |>
+  select(Relationship, Data, Intercept, Slope, `R-squared`)
+
+p_clustering_predictors
+knitr::kable(
+  clustering_predictor_fits,
+  digits = 4,
+  caption = "Linear regressions of unipartite clustering coefficient"
+)
+```
+
+```{r looped-clustering-regressions, fig.width=12, fig.height=5}
+looped_clustering_data <- comparison_data |>
+  filter(
+    as.character(type) == "looped",
+    is.finite(N_treatments), N_treatments > 0,
+    is.finite(unipartite_c)
+  ) |>
+  mutate(
+    mean_unipartite_degree_over_N =
+      mean_unipartite_unweighted_degree / N_treatments,
+    inverse_N = 1 / N_treatments
+  )
+
+fit_looped_clustering <- function(data, predictor, relationship) {
+  data |>
+    filter(is.finite(.data[[predictor]])) |>
+    group_by(Data) |>
+    group_modify(~ {
+      fit <- lm(
+        reformulate(predictor, response = "unipartite_c"),
+        data = .x
+      )
+      tibble(
+        Relationship = relationship,
+        Intercept = unname(coef(fit)[["(Intercept)"]]),
+        Slope = unname(coef(fit)[[predictor]]),
+        `R-squared` = summary(fit)$r.squared
+      )
+    }) |>
+    ungroup()
+}
+
+p_looped_degree_over_N <- looped_clustering_data |>
+  filter(is.finite(mean_unipartite_degree_over_N)) |>
+  ggplot(
+    aes(
+      x = mean_unipartite_degree_over_N,
+      y = unipartite_c,
+      colour = Data
+    )
+  ) +
+  geom_point(size = 2, alpha = 0.75) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    title = "(a)",
+    x = "Mean unipartite degree / number of treatments",
+    y = "Clustering coefficient (Unipartite)"
+  )
+
+p_looped_inverse_N <- ggplot(
+  looped_clustering_data,
+  aes(x = inverse_N, y = unipartite_c, colour = Data)
+) +
+  geom_point(size = 2, alpha = 0.75) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    title = "(b)",
+    x = "1 / number of treatments",
+    y = "Clustering coefficient (Unipartite)"
+  )
+
+p_looped_clustering_regressions <-
+  p_looped_degree_over_N + p_looped_inverse_N +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+looped_clustering_fits <- bind_rows(
+  fit_looped_clustering(
+    looped_clustering_data,
+    "mean_unipartite_degree_over_N",
+    "(a) Mean unipartite degree / N"
+  ),
+  fit_looped_clustering(
+    looped_clustering_data,
+    "inverse_N",
+    "(b) 1 / N"
+  )
+) |>
+  mutate(Data = unname(comparison_labels[as.character(Data)])) |>
+  select(Relationship, Data, Intercept, Slope, `R-squared`)
+
+p_looped_clustering_regressions
+knitr::kable(
+  looped_clustering_fits,
+  digits = 4,
+  caption = "Linear regressions for looped networks only"
+)
+```
+
+```{r N-vs-mean-unipartite-degree-regression, fig.width=7, fig.height=5}
+N_degree_data <- comparison_data |>
+  filter(
+    is.finite(mean_unipartite_unweighted_degree),
+    is.finite(N_treatments)
+  )
+
+N_degree_fits <- N_degree_data |>
+  group_by(Data) |>
+  group_modify(~ {
+    fit <- lm(N_treatments ~ mean_unipartite_unweighted_degree, data = .x)
+    tibble(
+      Intercept = unname(coef(fit)[["(Intercept)"]]),
+      Slope = unname(coef(fit)[["mean_unipartite_unweighted_degree"]]),
+      `R-squared` = summary(fit)$r.squared
+    )
+  }) |>
+  ungroup()
+
+p_N_degree <- ggplot(
+  N_degree_data,
+  aes(
+    x = mean_unipartite_unweighted_degree,
+    y = N_treatments,
+    colour = Data
+  )
+) +
+  geom_point(size = 2, alpha = 0.75) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    x = "Mean unipartite degree",
+    y = "Number of treatments"
+  )
+
+p_N_degree
+knitr::kable(
+  N_degree_fits |>
+    mutate(Data = unname(comparison_labels[as.character(Data)])),
+  digits = 4,
+  caption = paste(
+    "Linear regression of the number of treatments on mean",
+    "unipartite degree for all networks"
+  )
+)
+```
+
+## Bipartite
+
+```{r clustering-bipartite, fig.width=12, fig.height=5}
+p_bi_clustering <- make_metric_figure(
+  "bipartite_c", "Clustering coefficient (Bipartite)", 0.05, TRUE, FALSE
+)
+p_bi_clustering
+
+knitr::kable(metric_numerics("bipartite_c"), digits = 3)
+```
+
+### Plot A: All networks
+
+```{r bipartite-clustering-all-network-regressions, fig.width=12, fig.height=5}
+prepare_bipartite_clustering_predictors <- function(data) {
+  data |>
+    filter(
+      is.finite(N_treatments), N_treatments > 0,
+      is.finite(N_total_trials), N_total_trials > 0,
+      is.finite(bipartite_c)
+    ) |>
+    mutate(
+      mean_trial_degree_over_N =
+        mean_bipartite_trial_degree / N_treatments,
+      inverse_N = 1 / N_treatments,
+      inverse_M = 1 / N_total_trials
+    )
+}
+
+make_bipartite_clustering_panel <- function(data, predictor, title, x_label) {
+  data |>
+    filter(is.finite(.data[[predictor]])) |>
+    ggplot(aes(x = .data[[predictor]], y = bipartite_c, colour = Data)) +
+    geom_point(size = 2, alpha = 0.75) +
+    geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
+    scale_colour_manual(
+      values = comparison_colors, labels = comparison_labels, name = "Data",
+      guide = comparison_dot_guide
+    ) +
+    labs(
+      title = title,
+      x = x_label,
+      y = "Clustering coefficient (Bipartite)"
+    )
+}
+
+fit_bipartite_clustering_predictor <- function(
+    data, predictor, relationship) {
+  data |>
+    filter(is.finite(.data[[predictor]])) |>
+    group_by(Data) |>
+    group_modify(~ {
+      fit <- lm(
+        reformulate(predictor, response = "bipartite_c"),
+        data = .x
+      )
+      tibble(
+        Relationship = relationship,
+        Intercept = unname(coef(fit)[["(Intercept)"]]),
+        Slope = unname(coef(fit)[[predictor]]),
+        `R-squared` = summary(fit)$r.squared
+      )
+    }) |>
+    ungroup()
+}
+
+bipartite_clustering_specs <- tribble(
+  ~predictor, ~relationship, ~title, ~x_label,
+  "mean_trial_degree_over_N", "(a) Bipartite density", "(a)",
+  "Bipartite density",
+  "inverse_N", "(b) 1 / N", "(b)",
+  "1 / number of treatments",
+  "inverse_M", "(c) 1 / M", "(c)",
+  "1 / number of trials"
+)
+
+bipartite_clustering_all_data <-
+  prepare_bipartite_clustering_predictors(comparison_data)
+
+bipartite_clustering_all_panels <- lapply(
+  seq_len(nrow(bipartite_clustering_specs)),
+  function(i) {
+    specification <- bipartite_clustering_specs[i, ]
+    make_bipartite_clustering_panel(
+      bipartite_clustering_all_data,
+      specification$predictor,
+      specification$title,
+      specification$x_label
+    )
+  }
+)
+
+p_bipartite_clustering_all <- wrap_plots(
+  bipartite_clustering_all_panels,
+  ncol = 3,
+  guides = "collect"
+) & theme(legend.position = "bottom")
+
+bipartite_clustering_all_fits <- bind_rows(lapply(
+  seq_len(nrow(bipartite_clustering_specs)),
+  function(i) {
+    specification <- bipartite_clustering_specs[i, ]
+    fit_bipartite_clustering_predictor(
+      bipartite_clustering_all_data,
+      specification$predictor,
+      specification$relationship
+    )
+  }
+)) |>
+  mutate(Data = unname(comparison_labels[as.character(Data)])) |>
+  select(Relationship, Data, Intercept, Slope, `R-squared`)
+
+p_bipartite_clustering_all
+knitr::kable(
+  bipartite_clustering_all_fits,
+  digits = 4,
+  caption = "Bipartite clustering regressions for all networks"
+)
+```
+
+### Plot B: Looped networks
+
+```{r bipartite-clustering-looped-network-regressions, fig.width=12, fig.height=5}
+bipartite_clustering_looped_data <- comparison_data |>
+  filter(as.character(type) == "looped") |>
+  prepare_bipartite_clustering_predictors()
+
+bipartite_clustering_looped_panels <- lapply(
+  seq_len(nrow(bipartite_clustering_specs)),
+  function(i) {
+    specification <- bipartite_clustering_specs[i, ]
+    make_bipartite_clustering_panel(
+      bipartite_clustering_looped_data,
+      specification$predictor,
+      specification$title,
+      specification$x_label
+    )
+  }
+)
+
+p_bipartite_clustering_looped <- wrap_plots(
+  bipartite_clustering_looped_panels,
+  ncol = 3,
+  guides = "collect"
+) & theme(legend.position = "bottom")
+
+bipartite_clustering_looped_fits <- bind_rows(lapply(
+  seq_len(nrow(bipartite_clustering_specs)),
+  function(i) {
+    specification <- bipartite_clustering_specs[i, ]
+    fit_bipartite_clustering_predictor(
+      bipartite_clustering_looped_data,
+      specification$predictor,
+      specification$relationship
+    )
+  }
+)) |>
+  mutate(Data = unname(comparison_labels[as.character(Data)])) |>
+  select(Relationship, Data, Intercept, Slope, `R-squared`)
+
+p_bipartite_clustering_looped
+knitr::kable(
+  bipartite_clustering_looped_fits,
+  digits = 4,
+  caption = "Bipartite clustering regressions for looped networks only"
+)
+```
+
+# Degree assortativity
+
+## Unipartite
+
+```{r assortativity-unipartite, fig.width=12, fig.height=4}
+p_assortativity <- make_metric_figure(
+  "assortativity", "Degree assortativity (Unipartite)", 0.1, FALSE, FALSE
+)
+p_assortativity
+
+knitr::kable(metric_numerics("assortativity"), digits = 3)
+```
+
+```{r}
+subset(comparison_data,Data=="Database"&assortativity>0)
+
+```
+
+## Bipartite
+
+```{r assortativity-bipartite, fig.width=12, fig.height=5}
+p_bi_assortativity <- make_metric_figure(
+  "bi_assortativity",
+  "Bipartite degree assortativity (Bipartite)",
+  0.1, TRUE, FALSE, fitted_line = FALSE
+)
+p_bi_assortativity
+
+knitr::kable(metric_numerics("bi_assortativity"), digits = 3)
+```
+
+```{r}
+subset(null_metrics, is.na(bi_assortativity)==TRUE &mean_bipartite_trial_degree!=2)
+```
+
+## unipartite-vs-bipartite
+
+```{r unipartite-vs-bipartite-assortativity, fig.width=7, fig.height=5}
+assortativity_comparison_data <- comparison_data |>
+  filter(is.finite(assortativity), is.finite(bi_assortativity))
+
+p_assortativity_comparison <- ggplot(
+  assortativity_comparison_data,
+  aes(x = assortativity, y = bi_assortativity, colour = Data)
+) +
+  geom_point(size = 2, alpha = 0.75) +
+  scale_colour_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_dot_guide
+  ) +
+  labs(
+    x = "Degree assortativity (Unipartite)",
+    y = "Bipartite degree assortativity (trial-treatment)"
+  )
+
+p_assortativity_comparison
+```
+
+# Degree irregularity
+
+## Unipartite
+
+```{r irregularity-unipartite, fig.width=12, fig.height=4}
+p_irregularity <- make_metric_figure(
+  "deg_irreg", "Degree irregularity (Unipartite)", 0.5, FALSE, TRUE
+)
+p_irregularity
+
+knitr::kable(metric_numerics("deg_irreg"), digits = 3)
+```
+```{r}
+cat("Proportion of empirical networks having irr<1:",nrow(subset(empirical_metrics,deg_irreg<1))/300)
+```
+```{r}
+subset(null_metrics,deg_irreg>0.5)
+```
+
+```{r}
+ui_irregularity_N_slope <- fitted_line_parameters |>
+  filter(
+    Metric == "Degree irregularity",
+    Network == "Unipartite",
+    `X-axis` == "N"
+  ) |>
+  pull(`Database Slope`)
+
+ui_irregularity_doubling_increase <- 2^ui_irregularity_N_slope
+cat(sprintf(
+  paste0(
+    "Doubling the number of treatments is associated with approximately ",
+    "a %.2g-fold change in unipartite irregularity.\n"
+  ),
+  ui_irregularity_doubling_increase
+))
+```
+
+## Bipartite trials
+
+```{r irregularity-bipartite-trials, fig.width=12, fig.height=5}
+p_bi_trial_irregularity <- make_metric_figure(
+  "bi_trial_deg_irreg", "Degree irregularity (Bipartite Trial)", 0.02,
+  TRUE, TRUE, fitted_line = FALSE
+)
+p_bi_trial_irregularity
+
+knitr::kable(metric_numerics("bi_trial_deg_irreg"), digits = 3)
+```
+
+```{r}
+cat("Number of empirical networks having metric = 0:",
+    nrow(subset(empirical_metrics, bi_trial_deg_irreg==0&mean_bipartite_trial_degree!=2)),"\n")
+cat("Number of empirical networks having metric <0.02:",
+    nrow(subset(empirical_metrics, bi_trial_deg_irreg<0.02)),"\n")
+
+cat("Number of empirical networks having metric >0.04:",
+    nrow(subset(empirical_metrics, bi_trial_deg_irreg>0.04)),"\n")
+cat("Number of simulated networks having metric >0.04:",
+    nrow(subset(null_metrics, bi_trial_deg_irreg>0.04)),"\n")
+```
+
+## Bipartite treatments
+
+```{r irregularity-bipartite-treatments, fig.width=12, fig.height=5}
+p_bi_treatment_irregularity <- make_metric_figure(
+  "bi_treatment_deg_irreg", "Degree irregularity (Bipartite Treatment)", 0.5,
+  TRUE, TRUE
+)
+p_bi_treatment_irregularity
+
+knitr::kable(metric_numerics("bi_treatment_deg_irreg"), digits = 3)
+```
+
+## Unipartite versus bipartite
+
+```{r unipartite-vs-bipartite-irregularity, fig.width=12, fig.height=5}
+p_trial_irregularity_comparison <- metric_scatter(
+  "deg_irreg",
+  "bi_trial_deg_irreg",
+  "Degree irregularity (Unipartite)",
+  "Degree irregularity (Bipartite trials)",
+  log_y = TRUE
+) + labs(title = "(a)")
+
+p_treatment_irregularity_comparison <- metric_scatter(
+  "deg_irreg",
+  "bi_treatment_deg_irreg",
+  "Degree irregularity (Unipartite)",
+  "Degree irregularity (Bipartite treatments)",
+  log_y = TRUE,
+) + labs(title = "(b)")
+
+p_unipartite_bipartite_irregularity <-
+  p_trial_irregularity_comparison +
+  p_treatment_irregularity_comparison +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_unipartite_bipartite_irregularity
+
+```
+
+```{r unipartite-vs-bipartite-irregularity-fits}
+irregularity_comparison_fit_data <- comparison_data |>
+  select(
+    Data, deg_irreg,
+    bi_trial_deg_irreg, bi_treatment_deg_irreg
+  ) |>
+  pivot_longer(
+    cols = c(bi_trial_deg_irreg, bi_treatment_deg_irreg),
+    names_to = "Bipartite nodes",
+    values_to = "bipartite_irregularity"
+  ) |>
+  mutate(
+    `Bipartite nodes` = recode(
+      `Bipartite nodes`,
+      bi_trial_deg_irreg = "Trials",
+      bi_treatment_deg_irreg = "Treatments"
+    ),
+    `Bipartite nodes` = factor(
+      `Bipartite nodes`, levels = c("Trials", "Treatments")
+    )
+  ) |>
+  filter(
+    is.finite(bipartite_irregularity), bipartite_irregularity > 0,
+    is.finite(deg_irreg), deg_irreg > 0
+  )
+
+irregularity_comparison_fits <- irregularity_comparison_fit_data |>
+  group_by(`Bipartite nodes`, Data) |>
+  group_modify(function(data, key) {
+    model <- lm(
+      log10(deg_irreg) ~ log10(bipartite_irregularity),
+      data = data
+    )
+    tibble(
+      Slope = unname(coef(model)[2]),
+      Intercept = unname(coef(model)[1]),
+      `R-squared` = summary(model)$r.squared
+    )
+  }) |>
+  ungroup() |>
+  mutate(Data = unname(comparison_labels[as.character(Data)])) |>
+  select(`Bipartite nodes`, Data, Slope, Intercept, `R-squared`)
+
+knitr::kable(
+  irregularity_comparison_fits,
+  digits = 3,
+  caption = paste(
+    "Log-log fitted-line parameters for unipartite degree irregularity",
+    "versus bipartite trial- and treatment-degree irregularity"
+  )
+)
+```
+
+# Mean degree relationships
+
+## Mean degree and degree irregularity
+
+```{r mean-degree-vs-irregularity, fig.width=12, fig.height=5}
+p_weighted_degree_irregularity <- metric_scatter(
+  "deg_irreg",
+  "mean_unipartite_weighted_degree",
+  "Degree irregularity (Unipartite)",
+  "Mean weighted degree (Unipartite)",
+  log_y = TRUE
+) + labs(title = "(a)")
+
+p_trial_degree_irregularity <- metric_scatter(
+  "bi_trial_deg_irreg",
+  "mean_bipartite_trial_degree",
+  "Trial-degree irregularity (Bipartite)",
+  "Mean trial degree (Bipartite)",
+  log_y = TRUE
+) + labs(title = "(b)")
+
+p_treatment_degree_irregularity <- metric_scatter(
+  "bi_treatment_deg_irreg",
+  "mean_bipartite_treatment_degree",
+  "Treatment-degree irregularity (Bipartite)",
+  "Mean treatment degree (Bipartite)",
+  log_y = TRUE
+) + labs(title = "(c)")
+
+p_mean_degree_irregularity <-
+  p_weighted_degree_irregularity +
+  p_trial_degree_irregularity +
+  p_treatment_degree_irregularity +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_mean_degree_irregularity
+
+```
+
+## Treatment-to-trial ratio and bipartite degree irregularity
+
+```{r bipartite-irregularity-vs-treatment-trial-ratio, fig.width=7, fig.height=5}
+bi_irregularity_ratio_data <- comparison_data |>
+  mutate(treatment_trial_ratio = N_treatments / N_total_trials) |>
+  select(
+    Data, treatment_trial_ratio,
+    bi_trial_deg_irreg, bi_treatment_deg_irreg
+  ) |>
+  pivot_longer(
+    cols = c(bi_trial_deg_irreg, bi_treatment_deg_irreg),
+    names_to = "Node type",
+    values_to = "degree_irregularity"
+  ) |>
+  mutate(
+    `Node type` = recode(
+      `Node type`,
+      bi_trial_deg_irreg = "Trials",
+      bi_treatment_deg_irreg = "Treatments"
+    )
+  ) |>
+  filter(
+    is.finite(treatment_trial_ratio), treatment_trial_ratio > 0,
+    is.finite(degree_irregularity), degree_irregularity > 0
+  )
+
+bi_irregularity_ratio_parameters_long <- bi_irregularity_ratio_data |>
+  group_by(`Node type`, Data) |>
+  group_modify(function(data, key) {
+    x_fit <- log10(data$treatment_trial_ratio)
+    y_fit <- log10(data$degree_irregularity)
+    model <- lm(y_fit ~ x_fit)
+    tibble(
+      Slope = unname(coef(model)[2]),
+      Intercept = unname(coef(model)[1]),
+      `R-squared` = summary(model)$r.squared
+    )
+  }) |>
+  ungroup()
+
+p_bi_irregularity_ratio <- ggplot() +
+  geom_point(
+    data = filter(bi_irregularity_ratio_data, Data == "Null Model"),
+    aes(x = treatment_trial_ratio, y = degree_irregularity, fill = Data),
+    shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.90, size = 2
+  ) +
+  geom_smooth(
+    data = filter(bi_irregularity_ratio_data, Data == "Null Model"),
+    aes(x = treatment_trial_ratio, y = degree_irregularity, colour = Data),
+    method = "lm", formula = y ~ x, se = FALSE,
+    linewidth = 0.9, alpha = 0.90, show.legend = FALSE
+  ) +
+  geom_point(
+    data = filter(bi_irregularity_ratio_data, Data == "Database"),
+    aes(x = treatment_trial_ratio, y = degree_irregularity, fill = Data),
+    shape = 21, colour = "grey15", stroke = 0.35, alpha = 0.70, size = 2
+  ) +
+  geom_smooth(
+    data = filter(bi_irregularity_ratio_data, Data == "Database"),
+    aes(x = treatment_trial_ratio, y = degree_irregularity, colour = Data),
+    method = "lm", formula = y ~ x, se = FALSE,
+    linewidth = 0.9, alpha = 0.70, show.legend = FALSE
+  ) +
+  scale_fill_manual(
+    values = comparison_colors, labels = comparison_labels, name = "Data",
+    guide = comparison_filled_dot_guide
+  ) +
+  scale_colour_manual(values = comparison_colors, guide = "none") +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  facet_wrap(vars(`Node type`), nrow = 1) +
+  labs(
+    x = "Ratio of treatments to trials (N/M)",
+    y = "Degree irregularity (Bipartite)"
+  ) +
+  theme(legend.position = "right")
+
+p_bi_irregularity_ratio
+
+
+knitr::kable(
+  bi_irregularity_ratio_parameters_long |>
+    mutate(Data = unname(comparison_labels[as.character(Data)])),
+  digits = 3,
+  caption = paste(
+    "Log-log fitted-line parameters for bipartite trial- and treatment-degree irregularity",
+    "versus the treatment-to-trial ratio"
+  )
+)
+```
+
+## Mean degree and degree assortativity
+
+```{r mean-degree-vs-assortativity, fig.width=12, fig.height=5}
+p_weighted_degree_assortativity <- metric_scatter(
+  "assortativity",
+  "mean_unipartite_weighted_degree",
+  "Degree assortativity (Unipartite)",
+  "Mean weighted degree (Unipartite)"
+) + labs(title = "(a)")
+
+p_trial_degree_assortativity <- metric_scatter(
+  "bi_assortativity",
+  "mean_bipartite_trial_degree",
+  "Bipartite degree assortativity (trial-treatment)",
+  "Mean trial degree (Bipartite)"
+) + labs(title = "(b)")
+
+p_treatment_degree_assortativity <- metric_scatter(
+  "bi_assortativity",
+  "mean_bipartite_treatment_degree",
+  "Bipartite degree assortativity (trial-treatment)",
+  "Mean treatment degree (Bipartite)"
+) + labs(title = "(c)")
+
+p_mean_degree_assortativity <-
+  p_weighted_degree_assortativity +
+  p_trial_degree_assortativity +
+  p_treatment_degree_assortativity +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_mean_degree_assortativity
+
+```
+
+```{r edge-multiplicity-summary}
+edge_multiplicity_summary <- edge_multiplicity_comparison |>
+  group_by(Data) |>
+  summarise(
+    Edges = sum(count),
+    `Proportion with multiplicity below 5` = sum(count[multi < 5]) / Edges,
+    `Minimum multiplicity` = min(multi),
+    `Maximum multiplicity` = max(multi),
+    .groups = "drop"
+  )
+
+low_degree_summary <- degree_unipartite |>
+  group_by(Data) |>
+  summarise(
+    `Proportion of treatments with no more than two comparators` =
+      sum(count[degree <= 2]) / sum(count),
+    .groups = "drop"
+  )
+
+knitr::kable(edge_multiplicity_summary, digits = 3)
+knitr::kable(low_degree_summary, digits = 3)
+```
+
+# Saved comparison data
+
+## Fitted-line parameter table
+
+The original parameter rows are loaded from the results prepared by `null_model_sample.Rmd`. The mean-degree rows are fitted here with the same transformations used by the two mean-degree figures above.
+
+```{r fitted-line-parameter-table, echo=FALSE, results='asis'}
+mean_degree_fit_specs <- tribble(
+  ~Metric, ~Network, ~predictor, ~`X-axis`, ~response, ~`Y-axis`, ~log_y,
+  "Degree irregularity", "Unipartite",
+  "mean_unipartite_weighted_degree", "Mean weighted degree",
+  "deg_irreg", "log10(Degree irregularity (Unipartite))", TRUE,
+  "Trial-degree irregularity", "Bipartite",
+  "mean_bipartite_trial_degree", "Mean trial degree",
+  "bi_trial_deg_irreg", "log10(Trial-degree irregularity (Bipartite))", TRUE,
+  "Treatment-degree irregularity", "Bipartite",
+  "mean_bipartite_treatment_degree", "Mean treatment degree",
+  "bi_treatment_deg_irreg", "log10(Treatment-degree irregularity (Bipartite))", TRUE,
+  "Degree assortativity", "Unipartite",
+  "mean_unipartite_weighted_degree", "Mean weighted degree",
+  "assortativity", "Degree assortativity (Unipartite)", FALSE,
+  "Degree assortativity", "Bipartite",
+  "mean_bipartite_trial_degree", "Mean trial degree",
+  "bi_assortativity", "Bipartite degree assortativity (trial-treatment)", FALSE,
+  "Degree assortativity", "Bipartite",
+  "mean_bipartite_treatment_degree", "Mean treatment degree",
+  "bi_assortativity", "Bipartite degree assortativity (trial-treatment)", FALSE
+)
+
+fit_mean_degree_line <- function(specification) {
+  model_data <- comparison_data |>
+    filter(
+      is.finite(.data[[specification$response]]),
+      is.finite(.data[[specification$predictor]]),
+      .data[[specification$predictor]] > 0
+    )
+  if (specification$log_y) {
+    model_data <- model_data |>
+      filter(.data[[specification$response]] > 0)
+  }
+
+  model_data |>
+    group_by(Data) |>
+    group_modify(function(data, key) {
+      x_fit <- log10(data[[specification$predictor]])
+      y_fit <- if (specification$log_y) {
+        log10(data[[specification$response]])
+      } else {
+        data[[specification$response]]
+      }
+      model <- lm(y_fit ~ x_fit)
+      tibble(
+        Metric = specification$Metric,
+        Network = specification$Network,
+        `X-axis` = specification$`X-axis`,
+        `Y-axis` = specification$`Y-axis`,
+        Slope = unname(coef(model)[2]),
+        Intercept = unname(coef(model)[1]),
+        `R-squared` = summary(model)$r.squared
+      )
+    }) |>
+    ungroup()
+}
+
+mean_degree_fitted_line_parameters <- bind_rows(lapply(
+  seq_len(nrow(mean_degree_fit_specs)),
+  function(i) fit_mean_degree_line(mean_degree_fit_specs[i, ])
+)) |>
+  pivot_wider(
+    id_cols = c(Metric, Network, `X-axis`, `Y-axis`),
+    names_from = Data,
+    values_from = c(Slope, Intercept, `R-squared`),
+    names_glue = "{Data} { .value}"
+  ) |>
+  select(
+    Metric, Network, `X-axis`, `Y-axis`,
+    `Database Slope`, `Database Intercept`, `Database R-squared`,
+    `Null Model Slope`, `Null Model Intercept`, `Null Model R-squared`
+  )
+
+bi_irregularity_ratio_fitted_line_parameters <-
+  bi_irregularity_ratio_parameters_long |>
+  mutate(
+    Metric = if_else(
+      `Node type` == "Trials",
+      "Trial-degree irregularity",
+      "Treatment-degree irregularity"
+    ),
+    Network = "Bipartite",
+    `X-axis` = "Treatment-to-trial ratio (N/M)",
+    `Y-axis` = if_else(
+      `Node type` == "Trials",
+      "log10(Trial-degree irregularity (Bipartite))",
+      "log10(Treatment-degree irregularity (Bipartite))"
+    )
+  ) |>
+  pivot_wider(
+    id_cols = c(Metric, Network, `X-axis`, `Y-axis`),
+    names_from = Data,
+    values_from = c(Slope, Intercept, `R-squared`),
+    names_glue = "{Data} { .value}"
+  ) |>
+  select(
+    Metric, Network, `X-axis`, `Y-axis`,
+    `Database Slope`, `Database Intercept`, `Database R-squared`,
+    `Null Model Slope`, `Null Model Intercept`, `Null Model R-squared`
+  )
+
+fitted_line_parameters <- fitted_line_parameters |>
+  bind_rows(
+    mean_degree_fitted_line_parameters,
+    bi_irregularity_ratio_fitted_line_parameters
+  ) |>
+  mutate(
+    Network = factor(Network, levels = c("Unipartite", "Bipartite")),
+    `X-axis` = factor(
+      `X-axis`,
+      levels = c(
+        "N", "M", "Treatment-to-trial ratio (N/M)",
+        "Mean weighted degree", "Mean trial degree", "Mean treatment degree"
+      )
+    )
+  ) |>
+  arrange(Metric, Network, `X-axis`)
+
+format_parameter <- function(value) {
+  ifelse(is.finite(value), sprintf("%.3f", value), "NA")
+}
+
+format_x_axis <- function(value) {
+  recode(
+    as.character(value),
+    N = "log10(N)",
+    M = "log10(M)",
+    .default = as.character(value)
+  )
+}
+
+cat(
+  '<table class="table table-striped table-condensed">',
+  '<caption>Fitted-line parameters by metric, network representation, and axis.</caption>',
+  '<thead>',
+  '<tr>',
+  '<th rowspan="2">Metric</th>',
+  '<th rowspan="2">Network</th>',
+  '<th rowspan="2">X-axis</th>',
+  '<th rowspan="2">Y-axis</th>',
+  '<th colspan="3" style="text-align:center">Database</th>',
+  '<th colspan="3" style="text-align:center">Null Model</th>',
+  '</tr>',
+  '<tr>',
+  '<th>Slope</th><th>Intercept</th><th>R<sup>2</sup></th>',
+  '<th>Slope</th><th>Intercept</th><th>R<sup>2</sup></th>',
+  '</tr>',
+  '</thead><tbody>',
+  sep = "\n"
+)
+
+for (metric_i in unique(fitted_line_parameters$Metric)) {
+  metric_rows <- fitted_line_parameters |>
+    filter(Metric == metric_i)
+  metric_first <- TRUE
+  for (network_i in c("Unipartite", "Bipartite")) {
+    network_rows <- metric_rows |>
+      filter(as.character(Network) == network_i)
+    if (nrow(network_rows) == 0L) next
+    network_first <- TRUE
+    for (row_i in seq_len(nrow(network_rows))) {
+      row <- network_rows[row_i, ]
+      cat("<tr>\n")
+      if (metric_first) {
+        cat(sprintf(
+          '<td rowspan="%d"><strong>%s</strong></td>\n',
+          nrow(metric_rows), metric_i
+        ))
+        metric_first <- FALSE
+      }
+      if (network_first) {
+        cat(sprintf(
+          '<td rowspan="%d">%s</td>\n',
+          nrow(network_rows), network_i
+        ))
+        network_first <- FALSE
+      }
+      cat(sprintf('<td>%s</td>\n', format_x_axis(row$`X-axis`)))
+      cat(sprintf('<td>%s</td>\n', row$`Y-axis`))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Database Slope`)))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Database Intercept`)))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Database R-squared`)))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Null Model Slope`)))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Null Model Intercept`)))
+      cat(sprintf('<td>%s</td>\n', format_parameter(row$`Null Model R-squared`)))
+      cat("</tr>\n")
+    }
+  }
+}
+cat("</tbody></table>\n")
+```
+
+```{r save-comparison-data}
+saveRDS(comparison_data, file.path(result_dir, "metrics_comparison_data.rds"))
+write.csv(
+  comparison_data,
+  file.path(result_dir, "metrics_comparison_data.csv"),
+  row.names = FALSE
+)
+```

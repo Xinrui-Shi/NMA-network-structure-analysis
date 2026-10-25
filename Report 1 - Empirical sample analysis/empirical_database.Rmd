@@ -1,0 +1,689 @@
+---
+title: "Empirical Network Database"
+author: "Xinrui Shi"
+date: "2026-08-04"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(readxl)
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(tnet)
+
+input_dir <- dirname(knitr::current_input(dir = TRUE))
+report_dir <- if (file.exists(file.path(input_dir, "NMA network structure analysis.Rproj"))) {
+  input_dir
+} else {
+  normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+}
+empirical_data_dir <- file.path(report_dir, "Empirical data", "raw")
+result_dir <- file.path(report_dir, "Empirical data", "results")
+dir.create(result_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Reconstruct incidence matrices using the shared data-processing functions.
+source(file.path(report_dir, "Common R functions", "data_processing.R"))
+source(file.path(report_dir, "Common R functions", "metric_functions.R"))
+
+database_colour <- "#0072B2"
+y_axis_floor <- 0.5
+x_label_unipartite_degree <- "Number of other treatments \n compared to each treatment"
+x_label_bipartite_trial_degree <- "Number of arms in the trial"
+x_label_bipartite_treatment_degree <- "Number of trials including the treatment"
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.major.x = element_blank()
+  )
+theme_set(plot_theme)
+
+plain_log_labels <- function(x) {
+  format(x, scientific = FALSE, trim = TRUE)
+}
+plain_log_breaks <- function(x) {
+  x <- x[is.finite(x) & x > 0]
+  10^seq(0, ceiling(log10(max(x))))
+}
+```
+
+# Read the empirical database
+
+No previously saved metric table is read in this report. Every empirical
+network is reconstructed from its raw Excel workbook.
+
+```{r read-raw-database}
+empirical_files <- list.files(
+  empirical_data_dir,
+  pattern = "^570-[0-9]+_dataset\\.xlsx$",
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+empirical_files <- empirical_files[order(
+  as.integer(sub(
+    "^570-([0-9]+)_dataset\\.xlsx$", "\\1",
+    basename(empirical_files), ignore.case = TRUE
+  ))
+)]
+if (length(empirical_files) == 0L) stop("No empirical Excel datasets found.")
+
+empirical_networks <- list()
+empirical_raw_data <- list()
+failed_empirical_files <- character()
+for (file_i in empirical_files) {
+  network_id <- sub("_dataset\\.xlsx$", "", basename(file_i), ignore.case = TRUE)
+  raw_data <- tryCatch(
+    suppressMessages(readxl::read_excel(file_i)),
+    error = function(error) error
+  )
+  if (inherits(raw_data, "error")) {
+    failed_empirical_files <- c(failed_empirical_files, network_id)
+    next
+  }
+  empirical_raw_data[[network_id]] <- raw_data
+
+  B <- tryCatch(
+    create_edge_list(raw_data),
+    error = function(error) error
+  )
+  if (inherits(B, "error") || is.null(B) || nrow(B) == 0L || ncol(B) == 0L) {
+    failed_empirical_files <- c(failed_empirical_files, network_id)
+    next
+  }
+  empirical_networks[[network_id]] <- B
+}
+if (length(empirical_networks) == 0L) stop("No empirical networks were valid.")
+
+saveRDS(
+  empirical_networks,
+  file.path(result_dir, "empirical_incidence_networks.rds")
+)
+writeLines(
+  failed_empirical_files,
+  file.path(result_dir, "empirical_files_not_processed.txt")
+)
+cat("Raw workbooks processed:", length(empirical_networks), "\n")
+cat("Raw workbooks not processed:", length(failed_empirical_files), "\n")
+```
+
+# Extract and validate arm sample sizes
+
+Each row of the sample-size file identifies one trial-treatment arm. Long-format
+workbooks contribute `n` for `(StudyID, t)`, while wide-format workbooks match
+`n1`, `n2`, ... to `t1`, `t2`, ... by their numeric suffix. The error log has
+one row per network and error category.
+
+```{r extract-empirical-sample-sizes}
+empty_sample_size_data <- function() {
+  data.frame(
+    network_id = character(), StudyID = character(),
+    t = character(), n = numeric(), stringsAsFactors = FALSE
+  )
+}
+
+empty_sample_size_log <- function() {
+  data.frame(
+    network_id = character(), reason = character(),
+    stringsAsFactors = FALSE
+  )
+}
+
+is_missing_database_value <- function(x) {
+  x_character <- trimws(as.character(x))
+  is.na(x) | x_character == "" |
+    tolower(x_character) %in% c("na", "n/a", "null", ".", "-", "—", "–")
+}
+
+extract_sample_sizes <- function(raw_data, network_id) {
+  columns_raw <- names(raw_data)
+  columns_normalized <- norm_col(columns_raw)
+
+  study_index <- which(
+    columns_normalized == "studyid" |
+      grepl("^studyid\\d*$", columns_normalized) |
+      grepl("^id\\d*$", columns_normalized)
+  )
+  long_t_index <- which(columns_normalized == "t")
+  wide_t_index <- which(grepl("^t\\d+$", columns_normalized))
+
+  errors <- empty_sample_size_log()
+  if (length(study_index) == 0L ||
+      (length(long_t_index) == 0L && length(wide_t_index) == 0L)) {
+    errors <- data.frame(network_id = network_id, reason = "Column not found")
+    return(list(data = empty_sample_size_data(), errors = errors))
+  }
+
+  study_column <- columns_raw[study_index[1]]
+  arm_rows <- list()
+
+  if (length(long_t_index) > 0L) {
+    n_index <- which(columns_normalized == "n")
+    n_column_found <- length(n_index) > 0L
+    if (!n_column_found) {
+      errors <- bind_rows(
+        errors,
+        data.frame(network_id = network_id, reason = "Column not found")
+      )
+    }
+    arm_rows[[1]] <- data.frame(
+      StudyID = as.character(raw_data[[study_column]]),
+      t = as.character(raw_data[[columns_raw[long_t_index[1]]]]),
+      n_raw = if (n_column_found) {
+        as.character(raw_data[[columns_raw[n_index[1]]]])
+      } else {
+        rep(NA_character_, nrow(raw_data))
+      },
+      n_column_found = n_column_found,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    for (t_index in wide_t_index) {
+      suffix <- sub("^t", "", columns_normalized[t_index])
+      n_index <- which(columns_normalized == paste0("n", suffix))
+      n_column_found <- length(n_index) > 0L
+      if (!n_column_found) {
+        errors <- bind_rows(
+          errors,
+          data.frame(network_id = network_id, reason = "Column not found")
+        )
+      }
+      arm_rows[[length(arm_rows) + 1L]] <- data.frame(
+        StudyID = as.character(raw_data[[study_column]]),
+        t = as.character(raw_data[[columns_raw[t_index]]]),
+        n_raw = if (n_column_found) {
+          as.character(raw_data[[columns_raw[n_index[1]]]])
+        } else {
+          rep(NA_character_, nrow(raw_data))
+        },
+        n_column_found = n_column_found,
+        stringsAsFactors = FALSE
+      )
+    }
+  }
+
+  arms <- bind_rows(arm_rows)
+  valid_pair <- !is_missing_database_value(arms$StudyID) &
+    !is_missing_database_value(arms$t)
+  arms <- arms[valid_pair, , drop = FALSE]
+  if (nrow(arms) == 0L) {
+    return(list(data = empty_sample_size_data(), errors = distinct(errors)))
+  }
+
+  n_missing <- is_missing_database_value(arms$n_raw)
+  n_numeric <- to_numeric_tolerant(arms$n_raw)
+  n_integer <- !n_missing & is.finite(n_numeric) &
+    abs(n_numeric - round(n_numeric)) < 1e-8
+
+  # A missing n column is already represented by "Column not found". Only
+  # present n columns are checked for missing cell values.
+  if (any(arms$n_column_found & n_missing)) {
+    errors <- bind_rows(
+      errors,
+      data.frame(
+        network_id = network_id,
+        reason = "Missing data for (StudyID, t)"
+      )
+    )
+  }
+  if (any(arms$n_column_found & !n_missing & !n_integer)) {
+    errors <- bind_rows(
+      errors,
+      data.frame(network_id = network_id, reason = "n is not integer")
+    )
+  }
+
+  n_numeric[n_integer] <- round(n_numeric[n_integer])
+  sample_size_data <- data.frame(
+    network_id = network_id,
+    StudyID = trimws(arms$StudyID),
+    t = trimws(arms$t),
+    n = n_numeric,
+    stringsAsFactors = FALSE
+  )
+
+  list(data = sample_size_data, errors = distinct(errors))
+}
+
+sample_size_results <- lapply(names(empirical_raw_data), function(network_id) {
+  extract_sample_sizes(empirical_raw_data[[network_id]], network_id)
+})
+
+empirical_sample_sizes <- bind_rows(
+  lapply(sample_size_results, `[[`, "data")
+)
+empirical_sample_size_errors <- bind_rows(
+  lapply(sample_size_results, `[[`, "errors")
+) |>
+  distinct(network_id, reason) |>
+  arrange(network_id, reason)
+
+write.csv(
+  empirical_sample_sizes,
+  file.path(result_dir, "empirical_sample_sizes.csv"),
+  row.names = FALSE,
+  na = ""
+)
+write.csv(
+  empirical_sample_size_errors,
+  file.path(result_dir, "empirical_sample_size_errors.log"),
+  row.names = FALSE
+)
+
+cat("Trial-treatment sample sizes extracted:", nrow(empirical_sample_sizes), "\n")
+cat("Networks with sample-size errors:",
+    n_distinct(empirical_sample_size_errors$network_id), "\n")
+```
+
+# Compute and save empirical results
+
+```{r compute-empirical-results}
+# This table includes the mean bipartite trial/treatment degrees and the mean
+# weighted/unweighted unipartite degrees returned by metric_functions.R.
+empirical_metrics <- compute_metrics_for_networks(empirical_networks)
+mean_degree_columns <- c(
+  "mean_bipartite_trial_degree",
+  "mean_bipartite_treatment_degree",
+  "mean_unipartite_weighted_degree",
+  "mean_unipartite_unweighted_degree"
+)
+stopifnot(all(mean_degree_columns %in% names(empirical_metrics)))
+degree_irregularity_columns <- c(
+  "bi_trial_deg_irreg",
+  "bi_treatment_deg_irreg"
+)
+stopifnot(all(degree_irregularity_columns %in% names(empirical_metrics)))
+stopifnot("diameter" %in% names(empirical_metrics))
+
+weighted_degree_variance <- vapply(empirical_networks, function(B) {
+  B <- 1L * (as.matrix(B) != 0)
+  B <- B[rowSums(B) >= 2L, , drop = FALSE]
+  B <- B[, colSums(B) > 0L, drop = FALSE]
+  weighted_projection <- crossprod(B)
+  diag(weighted_projection) <- 0
+  stats::var(rowSums(weighted_projection))
+}, numeric(1))
+
+empirical_weighted_degree_summary <- empirical_metrics |>
+  transmute(
+    network_id,
+    N = N_treatments,
+    mean_weighted_degree = mean_unipartite_weighted_degree,
+    variance_weighted_degree = unname(
+      weighted_degree_variance[network_id]
+    )
+  )
+empirical_edge_multiplicity <- compute_edge_multiplicity_for_networks(
+  empirical_networks
+)
+empirical_MNS <- bind_rows(lapply(seq_along(empirical_networks), function(i) {
+  B <- empirical_networks[[i]]
+  data.frame(
+    network_id = names(empirical_networks)[i],
+    M = nrow(B), N = ncol(B), S = sum(B)
+  )
+}))
+
+degree_rows <- lapply(seq_along(empirical_networks), function(i) {
+  B <- empirical_networks[[i]]
+  projection <- crossprod(B)
+  diag(projection) <- 0
+  graph <- graph_from_adjacency_matrix(
+    1L * (projection > 0), mode = "undirected", diag = FALSE
+  )
+  list(
+    unipartite = data.frame(
+      network_id = names(empirical_networks)[i],
+      degree = as.integer(degree(graph))
+    ),
+    trial = data.frame(
+      network_id = names(empirical_networks)[i],
+      degree = as.integer(rowSums(B))
+    ),
+    treatment = data.frame(
+      network_id = names(empirical_networks)[i],
+      degree = as.integer(colSums(B))
+    )
+  )
+})
+empirical_degree_unipartite <- bind_rows(lapply(degree_rows, `[[`, "unipartite"))
+empirical_degree_trial <- bind_rows(lapply(degree_rows, `[[`, "trial"))
+empirical_degree_treatment <- bind_rows(lapply(degree_rows, `[[`, "treatment"))
+
+aggregate_degrees <- function(data) {
+  data |> filter(degree > 0) |> count(degree, name = "count")
+}
+empirical_degree_counts <- list(
+  unipartite = aggregate_degrees(empirical_degree_unipartite),
+  trial = aggregate_degrees(empirical_degree_trial),
+  treatment = aggregate_degrees(empirical_degree_treatment)
+)
+
+saveRDS(empirical_metrics, file.path(result_dir, "empirical_metrics.rds"))
+saveRDS(
+  empirical_edge_multiplicity,
+  file.path(result_dir, "empirical_edge_multiplicity.rds")
+)
+saveRDS(empirical_MNS, file.path(result_dir, "empirical_MNS.rds"))
+saveRDS(
+  list(
+    unipartite = empirical_degree_unipartite,
+    trial = empirical_degree_trial,
+    treatment = empirical_degree_treatment,
+    counts = empirical_degree_counts
+  ),
+  file.path(result_dir, "empirical_degrees.rds")
+)
+write.csv(empirical_metrics, file.path(result_dir, "empirical_metrics.csv"), row.names = FALSE)
+write.csv(
+  empirical_edge_multiplicity,
+  file.path(result_dir, "empirical_edge_multiplicity.csv"),
+  row.names = FALSE
+)
+write.csv(empirical_MNS, file.path(result_dir, "empirical_MNS.csv"), row.names = FALSE)
+write.csv(empirical_degree_counts$unipartite, file.path(result_dir, "degree_unipartite.csv"), row.names = FALSE)
+write.csv(empirical_degree_counts$trial, file.path(result_dir, "degree_bipartite_trial.csv"), row.names = FALSE)
+write.csv(empirical_degree_counts$treatment, file.path(result_dir, "degree_bipartite_treatment.csv"), row.names = FALSE)
+```
+
+# Basic characteristics
+
+## Numbers of trials and treatments
+
+```{r empirical-MN-plot, fig.width=12, fig.height=4}
+p_num_trial <- ggplot(empirical_MNS, aes(x = M)) +
+  geom_histogram(
+    fill = database_colour, colour = "grey15", linewidth = 0.25,
+    binwidth = 10, boundary = 0
+  ) +
+  labs(title = "(a)", x = "Number of trials", y = "Number of networks")
+
+p_num_treat <- ggplot(empirical_MNS, aes(x = N)) +
+  geom_histogram(
+    fill = database_colour, colour = "grey15", linewidth = 0.25,
+    binwidth = 2, boundary = 4
+  ) +
+  labs(title = "(b)", x = "Number of treatments", y = "Number of networks")
+
+p_MN_scatter <- ggplot(empirical_MNS, aes(x = N, y = M)) +
+  geom_count(
+    aes(size = after_stat(n)), shape = 21,
+    fill = database_colour, colour = "grey15", stroke = 0.35
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 6), breaks = 1:6, name = "Count",
+    guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_log10() +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(title = "(c)", x = "Number of treatments", y = "Number of trials")
+
+p_empirical_MN <- p_num_trial + p_num_treat + p_MN_scatter +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "horizontal"
+  )
+p_empirical_MN
+
+```
+
+## Number of bipartite edges
+
+```{r empirical-MNS-plot, fig.width=12, fig.height=4}
+
+p_empirical_S <- ggplot(empirical_MNS, aes(x = S)) +
+  geom_histogram(
+    fill = database_colour, colour = "grey15", linewidth = 0.25,
+    alpha = 0.9, binwidth = 20, boundary = 0
+  ) +
+  labs(title = "(a)", x = "Total number of arms", y = "Number of networks")
+
+empirical_MS_fit <- lm(S ~ M, data = empirical_MNS)
+empirical_MS_slope <- unname(coef(empirical_MS_fit)[["M"]])
+
+p_empirical_MS <- ggplot(empirical_MNS, aes(x = M, y = S)) +
+  geom_count(
+    aes(size = after_stat(n)), shape = 21,
+    fill = database_colour, colour = "grey15", stroke = 0.35, alpha = 0.9
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 8), breaks = c(1, 2, 4, 6, 8),
+    name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  labs(title = "(b)", x = "Number of trials", y = "Total number of arms") 
+
+
+
+p_empirical_NS <- ggplot(empirical_MNS, aes(x = N, y = S)) +
+  geom_count(
+    aes(size = after_stat(n)), shape = 21,
+    fill = database_colour, colour = "grey15", stroke = 0.35, alpha = 0.9
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 8), breaks = c(1, 2, 4, 6, 8),
+    name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_log10() + scale_y_log10() +
+  labs(title = "(c)", x = "Number of treatments", y = "Total number of arms")
+
+p_empirical_MNS <- p_empirical_S + p_empirical_MS + p_empirical_NS +
+  plot_layout(nrow = 1, guides = "collect") & theme(legend.position = "bottom")
+p_empirical_MNS
+
+
+```
+
+## Weighted unipartite degree relationships
+
+```{r empirical-weighted-degree-vs-N, fig.width=12, fig.height=5}
+p_mean_weighted_degree_vs_N <- ggplot(
+  empirical_weighted_degree_summary,
+  aes(x = N, y = mean_weighted_degree)
+) +
+  geom_count(
+    aes(size = after_stat(n)), shape = 21,
+    fill = database_colour, colour = "grey15", stroke = 0.35, alpha = 0.9
+  ) +
+  geom_smooth(
+    method = "lm", formula = y ~ x, se = FALSE,
+    colour = database_colour, linewidth = 0.9
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 8), breaks = c(1, 2, 4, 6, 8),
+    name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(a)", x = "Number of treatments",
+    y = "Mean weighted degree (Unipartite)"
+  )
+
+p_variance_weighted_degree_vs_N <- ggplot(
+  empirical_weighted_degree_summary,
+  aes(x = N, y = variance_weighted_degree)
+) +
+  geom_count(
+    aes(size = after_stat(n)), shape = 21,
+    fill = database_colour, colour = "grey15", stroke = 0.35, alpha = 0.9
+  ) +
+  geom_smooth(
+    method = "lm", formula = y ~ x, se = FALSE,
+    colour = database_colour, linewidth = 0.9
+  ) +
+  scale_size_area(
+    max_size = 8, limits = c(1, 8), breaks = c(1, 2, 4, 6, 8),
+    name = "Count", guide = guide_legend(nrow = 1, byrow = TRUE)
+  ) +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(b)", x = "Number of treatments",
+    y = "Variance of weighted degree (Unipartite)"
+  )
+
+p_weighted_degree_vs_N <-
+  p_mean_weighted_degree_vs_N +
+  p_variance_weighted_degree_vs_N +
+  plot_layout(nrow = 1, guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_weighted_degree_vs_N
+
+```
+
+## Numerics
+
+```{r empirical-numerics}
+cat("Number of networks:", nrow(empirical_MNS), "\n")
+cat("Number having trials <= 30:", sum(empirical_MNS$M <= 30), "\n")
+cat("Number having trials < 10:", sum(empirical_MNS$M < 10), "\n")
+cat("Number having 10 <= trials < 20:", sum(empirical_MNS$M >= 10 & empirical_MNS$M < 20), "\n")
+cat("Number having 20 <= trials <= 30:", sum(empirical_MNS$M >= 20 & empirical_MNS$M <= 30), "\n")
+cat("Number having trials > 100:", sum(empirical_MNS$M > 100), "\n")
+cat("Minimum and maximum trials:", min(empirical_MNS$M), max(empirical_MNS$M), "\n\n")
+
+cat("Number having treatments < 20:", sum(empirical_MNS$N < 20), "\n")
+cat("Number having treatments > 30:", sum(empirical_MNS$N > 30), "\n")
+cat("Number having treatments > 50:", sum(empirical_MNS$N > 50), "\n")
+cat("Minimum and maximum treatments:", min(empirical_MNS$N), max(empirical_MNS$N), "\n\n")
+
+cat("Minimum and maximum bipartite edges:", min(empirical_MNS$S), max(empirical_MNS$S), "\n")
+cat("Median bipartite edges:", median(empirical_MNS$S), "\n")
+cat(
+  "Slope of fitted line in empirical_MNS panel (b):",
+  empirical_MS_slope, "\n"
+)
+```
+
+# Degree distributions
+
+The three panels correspond to the **Final output figures** section of
+`soft_config_model.Rmd`.
+
+```{r prepare-degree-fits}
+trial_counts <- empirical_degree_counts$trial |> filter(degree >= 2)
+trial_vector <- rep(trial_counts$degree, trial_counts$count)
+trial_k_min <- min(trial_vector)
+trial_p <- 1 / (mean(trial_vector - trial_k_min) + 1)
+trial_theta <- 1 - trial_p
+trial_geometric_line <- data.frame(
+  degree = seq.int(trial_k_min, max(trial_vector))
+) |>
+  mutate(count = length(trial_vector) * trial_p * trial_theta^(degree - trial_k_min))
+
+empirical_trial_geometric_fit <- list(
+  theta = trial_theta,
+  k_min = trial_k_min,
+  n = length(trial_vector),
+  line = trial_geometric_line
+)
+saveRDS(
+  empirical_trial_geometric_fit,
+  file.path(result_dir, "empirical_trial_geometric_fit.rds")
+)
+write.csv(
+  data.frame(
+    theta = trial_theta,
+    k_min = trial_k_min,
+    n = length(trial_vector)
+  ),
+  file.path(result_dir, "empirical_trial_geometric_fit.csv"),
+  row.names = FALSE
+)
+```
+
+```{r empirical-final-degree-figure, fig.width=12, fig.height=4}
+p_degree_uni <- ggplot(empirical_degree_counts$unipartite, aes(degree, count)) +
+  geom_point(
+    shape = 21, fill = database_colour, colour = "grey15",
+    stroke = 0.30, alpha = 0.9
+  ) +
+  scale_x_log10() + scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(a)", x = x_label_unipartite_degree,
+    y = "Number of treatments"
+  )
+
+p_degree_trial <- ggplot(trial_counts, aes(degree, count)) +
+  geom_col(fill = database_colour, colour = database_colour,
+           width = 0.72, alpha = 0.90) +
+  geom_line(
+    data = filter(trial_geometric_line, count >= y_axis_floor),
+    aes(degree, count, colour = "Geometric fit"),
+    linetype = "dashed", linewidth = 0.9
+  ) +
+  scale_colour_manual(values = c("Geometric fit" = "red")) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(b)", x = x_label_bipartite_trial_degree,
+    y = "Number of trials", colour = NULL
+  )
+
+p_degree_treatment <- ggplot(empirical_degree_counts$treatment, aes(degree, count)) +
+  geom_point(
+    shape = 21, fill = database_colour, colour = "grey15",
+    stroke = 0.30, alpha = 0.9
+  ) +
+  scale_x_log10() + scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(c)", x = x_label_bipartite_treatment_degree,
+    y = "Number of treatments"
+  ) +
+  theme(axis.title.x = element_text(size = 9))
+
+p_empirical_all_degree <- p_degree_uni + p_degree_trial + p_degree_treatment +
+  plot_layout(nrow = 1)
+p_empirical_all_degree
+
+```
+
+# Check for repeated networks
+
+The `network_id` column is excluded when comparing rows. All remaining metric
+values must match exactly for a pair to be reported.
+
+```{r check-repeated-networks}
+metric_columns <- setdiff(names(empirical_metrics), "network_id")
+
+if (nrow(empirical_metrics) < 2L) {
+  repeated_network_pairs <- data.frame(
+    network_id_1 = character(),
+    network_id_2 = character()
+  )
+} else {
+  candidate_pairs <- utils::combn(seq_len(nrow(empirical_metrics)), 2L)
+  same_metrics <- apply(candidate_pairs, 2L, function(pair) {
+    all(vapply(metric_columns, function(column) {
+      identical(
+        empirical_metrics[[column]][pair[1]],
+        empirical_metrics[[column]][pair[2]]
+      )
+    }, logical(1)))
+  })
+  repeated_pairs <- candidate_pairs[, same_metrics, drop = FALSE]
+  repeated_network_pairs <- data.frame(
+    network_id_1 = empirical_metrics$network_id[repeated_pairs[1, ]],
+    network_id_2 = empirical_metrics$network_id[repeated_pairs[2, ]]
+  )
+}
+
+if (nrow(repeated_network_pairs) == 0L) {
+  cat("No repeated networks found in empirical_metrics.\n")
+} else {
+  cat("Network ID pairs with exactly matching metrics:\n")
+  print(repeated_network_pairs, row.names = FALSE)
+}
+```
+Checked:
+- 6, 32, 75 are different network extractions.
+- 10, 193 are different network extractions.
+- 255, 266 are different network extractions.

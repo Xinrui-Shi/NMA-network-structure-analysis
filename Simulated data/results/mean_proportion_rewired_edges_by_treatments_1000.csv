@@ -1,0 +1,121 @@
+"N","rewiring_target","mean_proportion_rewired","qualified_networks"
+4,"Total",0.126308180342854,119
+4,"Fix trial degree",0.124907620118764,119
+4,"Fix treatment degree",0.00140056022408964,119
+4,"Connect components",0,119
+5,"Total",0.14909727570101,88
+5,"Fix trial degree",0.145688184791919,88
+5,"Fix treatment degree",0.00340909090909091,88
+5,"Connect components",0,88
+6,"Total",0.174441269478135,112
+6,"Fix trial degree",0.159730385124393,112
+6,"Fix treatment degree",0.00965136054421769,112
+6,"Connect components",0.00505952380952381,112
+7,"Total",0.180086128772755,147
+7,"Fix trial degree",0.169102442368901,147
+7,"Fix treatment degree",0.00705592482303167,147
+7,"Connect components",0.0039277615808228,147
+8,"Total",0.188679626270747,84
+8,"Fix trial degree",0.173415686840233,84
+8,"Fix treatment degree",0.00716931269092923,84
+8,"Connect components",0.00809462673958472,84
+9,"Total",0.187271684391673,56
+9,"Fix trial degree",0.174641791107208,56
+9,"Fix treatment degree",0.010397750427322,56
+9,"Connect components",0.00223214285714286,56
+10,"Total",0.191706112114107,46
+10,"Fix trial degree",0.186436886678978,46
+10,"Fix treatment degree",0.00298089591567852,46
+10,"Connect components",0.0022883295194508,46
+11,"Total",0.207282294270629,47
+11,"Fix trial degree",0.190913140725377,47
+11,"Fix treatment degree",0.00739814446226072,47
+11,"Connect components",0.00897100908299116,47
+12,"Total",0.190471308312828,37
+12,"Fix trial degree",0.176324896454746,37
+12,"Fix treatment degree",0.00648875420042468,37
+12,"Connect components",0.00765765765765766,37
+13,"Total",0.204387475179627,54
+13,"Fix trial degree",0.194346328051621,54
+13,"Fix treatment degree",0.00659130065270378,54
+13,"Connect components",0.00344984647530227,54
+14,"Total",0.18498896266616,26
+14,"Fix trial degree",0.163260549291876,26
+14,"Fix treatment degree",0.0121130287588999,26
+14,"Connect components",0.00961538461538462,26
+15,"Total",0.194712802794688,21
+15,"Fix trial degree",0.189130665633604,21
+15,"Fix treatment degree",0.00558213716108453,21
+15,"Connect components",0,21
+16,"Total",0.186459249005084,24
+16,"Fix trial degree",0.179807202221458,24
+16,"Fix treatment degree",0.0020224171539961,24
+16,"Connect components",0.00462962962962963,24
+17,"Total",0.226136807487737,26
+17,"Fix trial degree",0.210616432092464,26
+17,"Fix treatment degree",0.0084690933439908,26
+17,"Connect components",0.00705128205128205,26
+18,"Total",0.190221429785904,20
+18,"Fix trial degree",0.173272638889745,20
+18,"Fix treatment degree",0.00898293029871977,20
+18,"Connect components",0.00796586059743954,20
+19,"Total",0.182793088442442,18
+19,"Fix trial degree",0.177172555628926,18
+19,"Fix treatment degree",0.00269655620532813,18
+19,"Connect components",0.00292397660818713,18
+20,"Total",0.203436562970653,12
+20,"Fix trial degree",0.200121991363399,12
+20,"Fix treatment degree",0.00331457160725453,12
+20,"Connect components",0,12
+21,"Total",0.170278637770898,1
+21,"Fix trial degree",0.170278637770898,1
+21,"Fix treatment degree",0,1
+21,"Connect components",0,1
+22,"Total",0.208650819432439,10
+22,"Fix trial degree",0.203095263876884,10
+22,"Fix treatment degree",0.00555555555555556,10
+22,"Connect components",0,10
+23,"Total",0.180794624621997,11
+23,"Fix trial degree",0.177072685696964,11
+23,"Fix treatment degree",0.0037219389250337,11
+23,"Connect components",0,11
+24,"Total",0.234796951536689,9
+24,"Fix trial degree",0.200280096343577,9
+24,"Fix treatment degree",0.0194213574684653,9
+24,"Connect components",0.0150954977246462,9
+25,"Total",0.203971882776605,7
+25,"Fix trial degree",0.18509122636844,7
+25,"Fix treatment degree",0.0076761746154478,7
+25,"Connect components",0.0112044817927171,7
+26,"Total",0.208531405398941,7
+26,"Fix trial degree",0.199459813375404,7
+26,"Fix treatment degree",0.0090715920235371,7
+26,"Connect components",0,7
+28,"Total",0.156862745098039,1
+28,"Fix trial degree",0.147058823529412,1
+28,"Fix treatment degree",0.00980392156862745,1
+28,"Connect components",0,1
+32,"Total",0.287878787878788,2
+32,"Fix trial degree",0.186237373737374,2
+32,"Fix treatment degree",0.057449494949495,2
+32,"Connect components",0.0441919191919192,2
+34,"Total",0.160583941605839,1
+34,"Fix trial degree",0.160583941605839,1
+34,"Fix treatment degree",0,1
+34,"Connect components",0,1
+38,"Total",0.215981281594848,4
+38,"Fix trial degree",0.215981281594848,4
+38,"Fix treatment degree",0,4
+38,"Connect components",0,4
+49,"Total",0.318082071538293,2
+49,"Fix trial degree",0.156627166995831,2
+49,"Fix treatment degree",0.0991332016677639,2
+49,"Connect components",0.0623217028746983,2
+50,"Total",0.172012680728585,4
+50,"Fix trial degree",0.15520595803951,4
+50,"Fix treatment degree",0.0126050420168067,4
+50,"Connect components",0.00420168067226891,4
+55,"Total",0.220787319194727,4
+55,"Fix trial degree",0.204685232220326,4
+55,"Fix treatment degree",0.0125809602138378,4
+55,"Connect components",0.00352112676056338,4
