@@ -19,11 +19,19 @@ library(tidyr)
 library(ggplot2)
 library(patchwork)
 
-input_dir <- dirname(knitr::current_input(dir = TRUE))
-report_dir <- if (file.exists(file.path(input_dir, "NMA network structure analysis.Rproj"))) {
-  input_dir
+input_file <- knitr::current_input(dir = TRUE)
+input_dir <- if (length(input_file) == 1L && nzchar(input_file)) {
+  dirname(input_file)
 } else {
+  getwd()
+}
+project_file <- "NMA network structure analysis.Rproj"
+report_dir <- if (file.exists(file.path(input_dir, project_file))) {
+  input_dir
+} else if (file.exists(file.path(input_dir, "..", project_file))) {
   normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+} else {
+  stop("Open NMA network structure analysis.Rproj before running this report.")
 }
 empirical_result_dir <- file.path(report_dir, "Empirical data", "results")
 null_result_dir <- file.path(report_dir, "Simulated data", "results")
@@ -1507,7 +1515,7 @@ subset(comparison_data,Data=="Database"&assortativity>0)
 ```{r assortativity-bipartite, fig.width=12, fig.height=5}
 p_bi_assortativity <- make_metric_figure(
   "bi_assortativity",
-  "Bipartite degree assortativity (Bipartite)",
+  "Degree assortativity (Bipartite)",
   0.1, TRUE, FALSE, fitted_line = FALSE
 )
 p_bi_assortativity
