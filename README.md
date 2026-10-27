@@ -2,8 +2,6 @@
 
 This standalone R project follows the paper's three stages: reconstruct the empirical network sample, simulate a qualified null sample, and compare network metrics. The supplied HTML files are reference reports from the existing analysis. Rendering the R Markdown files refreshes their results from the included data.
 
-##
-
 ## Open and run
 
 Open `NMA network structure analysis.Rproj` in RStudio. Install the required R packages if needed:

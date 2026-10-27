@@ -6,10 +6,20 @@ output:
   html_document:
     toc: true
     toc_depth: 2
+    self_contained: true
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+figure_dir <- file.path(tempdir(), "nma-report-2-figures")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+if (!dir.exists(figure_dir) || file.access(figure_dir, 2) != 0) {
+  stop("Cannot write to the temporary figure directory: ", figure_dir)
+}
+figure_dir <- normalizePath(figure_dir, winslash = "/", mustWork = TRUE)
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.path = paste0(figure_dir, "/")
+)
 set.seed(1220)
 
 library(igraph)
