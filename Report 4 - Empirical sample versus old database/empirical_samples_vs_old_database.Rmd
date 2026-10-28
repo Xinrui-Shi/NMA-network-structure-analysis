@@ -1,0 +1,917 @@
+---
+title: "2023 Sample and 2000-2019 Database Metrics Comparison"
+author: "Xinrui Shi"
+date: "2026-08-28"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+figure_dir <- file.path(tempdir(), "nma-report-4-figures")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+if (!dir.exists(figure_dir) || file.access(figure_dir, 2) != 0) {
+  stop("Cannot write to the temporary figure directory: ", figure_dir)
+}
+figure_dir <- normalizePath(figure_dir, winslash = "/", mustWork = TRUE)
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE,
+  fig.path = paste0(figure_dir, "/")
+)
+
+library(readxl)
+library(stringr)
+library(igraph)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(tnet)
+
+input_file <- knitr::current_input(dir = TRUE)
+input_dir <- if (length(input_file) == 1L && nzchar(input_file)) {
+  dirname(input_file)
+} else {
+  getwd()
+}
+project_file <- "NMA network structure analysis.Rproj"
+report_dir <- if (file.exists(file.path(input_dir, project_file))) {
+  input_dir
+} else if (file.exists(file.path(input_dir, "..", project_file))) {
+  normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+} else {
+  stop("Open NMA network structure analysis.Rproj before running this report.")
+}
+old_data_dir <- file.path(report_dir, "Empirical data", "old_database", "raw")
+extraction_file <- file.path(
+  report_dir, "Empirical data", "old_database", "extraction_table.xlsx"
+)
+data_processing_file <- file.path(
+  report_dir, "Common R functions", "data_processing.R"
+)
+metric_functions_file <- file.path(
+  report_dir, "Common R functions", "metric_functions.R"
+)
+empirical_network_file <- file.path(
+  report_dir, "Empirical data", "results", "empirical_incidence_networks.rds"
+)
+old_result_dir <- file.path(report_dir, "Empirical data", "old_database", "results")
+dir.create(old_result_dir, recursive = TRUE, showWarnings = FALSE)
+
+# Set this to TRUE after the raw old-database workbooks or extraction table
+# change. The default FALSE reuses the saved old-database outputs.
+rebuild_old_database <- FALSE
+
+old_network_cache_file <- file.path(
+  old_result_dir, "old_incidence_networks.rds"
+)
+old_processing_cache_file <- file.path(
+  old_result_dir, "old_database_processing.rds"
+)
+old_metrics_cache_file <- file.path(old_result_dir, "old_metrics.rds")
+old_edge_cache_file <- file.path(
+  old_result_dir, "old_edge_multiplicity.rds"
+)
+old_degrees_cache_file <- file.path(old_result_dir, "old_degrees.rds")
+old_trial_fit_cache_file <- file.path(
+  old_result_dir, "old_trial_geometric_fit.rds"
+)
+
+required_files <- c(
+  empirical_network_file,
+  metric_functions_file
+)
+old_network_cache_available <- all(file.exists(c(
+  old_network_cache_file, old_processing_cache_file
+)))
+if (rebuild_old_database || !old_network_cache_available) {
+  required_files <- c(required_files, data_processing_file, extraction_file)
+  if (!dir.exists(old_data_dir)) {
+    stop("Missing old-database data directory: ", old_data_dir)
+  }
+}
+missing_files <- required_files[!file.exists(required_files)]
+if (length(missing_files) > 0L) {
+  stop("Missing required file(s): ", paste(missing_files, collapse = ", "))
+}
+
+source(metric_functions_file)
+
+comparison_colors <- c(
+  "2000-2019 Database" = "#D55E00",
+  "2023 Sample" = "#0072B2"
+)
+comparison_alpha <- c("2000-2019 Database" = 0.90, "2023 Sample" = 0.70)
+degree_fit_colors <- c("2000-2019 Database" = "grey10", "2023 Sample" = "#0049F2")
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    panel.grid.major.x = element_blank()
+  )
+theme_set(plot_theme)
+
+plain_log_labels <- function(x) format(x, scientific = FALSE, trim = TRUE)
+x_label_unipartite_degree <- "Number of other treatments\ncompared to each treatment"
+x_label_bipartite_trial_degree <- "Number of arms in the trial"
+x_label_bipartite_treatment_degree <- "Number of trials\nincluding the treatment"
+```
+
+# Read the two databases
+
+The empirical samples are the 300 incidence matrices prepared by
+`empirical_database.Rmd`. By default, this report loads the supplied
+old-database incidence matrices. Set `rebuild_old_database <- TRUE` in the
+setup chunk to reconstruct them from the included Excel workbooks using the
+extraction table and exclusion logic below.
+
+```{r read-databases}
+empirical_networks <- readRDS(empirical_network_file)
+if (is.null(names(empirical_networks))) {
+  names(empirical_networks) <- paste0("empirical-", seq_along(empirical_networks))
+}
+
+if (!rebuild_old_database && old_network_cache_available) {
+  old_networks <- readRDS(old_network_cache_file)
+  old_processing <- readRDS(old_processing_cache_file)
+  excluded_old_ids <- old_processing$excluded_old_ids
+  old_files_not_processed <- old_processing$old_files_not_processed
+  old_network_source <- "Saved cache"
+} else {
+  # Rebuild incidence matrices with the project's shared conversion function.
+  source(data_processing_file)
+
+  old_files <- list.files(
+    old_data_dir,
+    pattern = "^[0-9]+_dataset\\.xlsx$",
+    full.names = TRUE
+  )
+  old_ids <- as.integer(sub("_dataset\\.xlsx$", "", basename(old_files)))
+  old_files <- old_files[order(old_ids)]
+  old_ids <- sort(old_ids)
+  if (length(old_files) == 0L) stop("No old-database workbooks were found.")
+
+  extraction <- readxl::read_excel(extraction_file) |>
+    transmute(
+      RecordID_clean = str_trim(str_remove(
+        as.character(RecordID), "\\s*\\(.*\\)\\s*"
+      )),
+      Include = str_trim(toupper(as.character(Include)))
+    )
+
+  excluded_old_ids <- extraction |>
+    filter(
+      RecordID_clean %in% paste0("570-", old_ids),
+      Include == "N"
+    ) |>
+    distinct(RecordID_clean) |>
+    mutate(old_id = as.integer(str_remove(RecordID_clean, "^570-"))) |>
+    pull(old_id)
+
+  old_networks <- list()
+  old_files_not_processed <- character()
+  for (file_i in old_files) {
+    old_id <- as.integer(sub("_dataset\\.xlsx$", "", basename(file_i)))
+    if (old_id %in% excluded_old_ids) next
+
+    raw_data <- tryCatch(
+      suppressMessages(readxl::read_excel(file_i)),
+      error = function(error) error
+    )
+    if (inherits(raw_data, "error")) {
+      old_files_not_processed <- c(old_files_not_processed, as.character(old_id))
+      next
+    }
+
+    B <- tryCatch(
+      suppressMessages(suppressWarnings(create_edge_list(raw_data))),
+      error = function(error) error
+    )
+    if (
+      inherits(B, "error") || is.null(B) || !is.matrix(B) ||
+        nrow(B) == 0L || ncol(B) == 0L
+    ) {
+      old_files_not_processed <- c(old_files_not_processed, as.character(old_id))
+      next
+    }
+    old_networks[[as.character(old_id)]] <- B
+  }
+  if (length(old_networks) == 0L) {
+    stop("No valid old-database networks were reconstructed.")
+  }
+
+  saveRDS(old_networks, old_network_cache_file)
+  saveRDS(
+    list(
+      excluded_old_ids = excluded_old_ids,
+      old_files_not_processed = old_files_not_processed
+    ),
+    old_processing_cache_file
+  )
+  old_network_source <- "Raw workbooks (cache created)"
+}
+
+database_processing <- tibble(
+  Data = c("2023 Sample", "2000-2019 Database"),
+  `Networks included` = c(length(empirical_networks), length(old_networks)),
+  `Raw files excluded` = c(NA_integer_, length(excluded_old_ids)),
+  `Raw files not processed` = c(NA_integer_, length(old_files_not_processed)),
+  Source = c("Saved empirical incidence file", old_network_source)
+)
+knitr::kable(database_processing, caption = "Database processing counts")
+```
+
+# Compute comparable results
+
+The empirical metrics are computed with `metric_functions.R`. Old-database
+metrics are computed with the same functions on the first run and saved for
+reuse. No metric columns from the old database's pre-existing summary report
+are used.
+
+```{r compute-results}
+empirical_metrics <- compute_metrics_for_networks(empirical_networks)
+empirical_edge_multiplicity <- compute_edge_multiplicity_for_networks(empirical_networks)
+
+compute_degrees <- function(networks) {
+  rows <- lapply(seq_along(networks), function(i) {
+    B <- 1L * (as.matrix(networks[[i]]) != 0)
+    B <- B[rowSums(B) >= 2L, , drop = FALSE]
+    B <- B[, colSums(B) > 0L, drop = FALSE]
+    projection <- crossprod(B)
+    diag(projection) <- 0
+    graph <- graph_from_adjacency_matrix(
+      1L * (projection > 0), mode = "undirected", diag = FALSE
+    )
+    list(
+      unipartite = tibble(
+        network_id = names(networks)[i], degree = as.integer(degree(graph))
+      ),
+      trial = tibble(
+        network_id = names(networks)[i], degree = as.integer(rowSums(B))
+      ),
+      treatment = tibble(
+        network_id = names(networks)[i], degree = as.integer(colSums(B))
+      )
+    )
+  })
+  aggregate_degree <- function(type) {
+    bind_rows(lapply(rows, `[[`, type)) |>
+      filter(degree > 0) |>
+      count(degree, name = "count")
+  }
+  list(
+    unipartite = aggregate_degree("unipartite"),
+    trial = aggregate_degree("trial"),
+    treatment = aggregate_degree("treatment")
+  )
+}
+
+empirical_degrees <- compute_degrees(empirical_networks)
+
+old_derived_cache_available <- all(file.exists(c(
+  old_metrics_cache_file,
+  old_edge_cache_file,
+  old_degrees_cache_file
+)))
+if (!rebuild_old_database && old_derived_cache_available) {
+  old_metrics <- readRDS(old_metrics_cache_file)
+  old_edge_multiplicity <- readRDS(old_edge_cache_file)
+  old_degrees <- readRDS(old_degrees_cache_file)
+} else {
+  old_metrics <- compute_metrics_for_networks(old_networks)
+  old_edge_multiplicity <- compute_edge_multiplicity_for_networks(old_networks)
+  old_degrees <- compute_degrees(old_networks)
+  saveRDS(old_metrics, old_metrics_cache_file)
+  saveRDS(old_edge_multiplicity, old_edge_cache_file)
+  saveRDS(old_degrees, old_degrees_cache_file)
+}
+
+# Older saved metric tables lack this column. Count edges in the same filtered
+# bipartite incidence matrices used by compute_metrics_for_networks().
+old_metrics$number_of_arms <- vapply(
+  old_networks[old_metrics$network_id],
+  function(network) {
+    B <- 1L * (as.matrix(network) != 0)
+    B <- B[rowSums(B) >= 2L, , drop = FALSE]
+    B <- B[, colSums(B) > 0L, drop = FALSE]
+    as.integer(sum(B))
+  },
+  integer(1)
+)
+
+comparison_data <- bind_rows(
+  old_metrics |> mutate(Data = "2000-2019 Database"),
+  empirical_metrics |> mutate(Data = "2023 Sample")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+fit_shifted_geometric <- function(degree_counts) {
+  degree_counts <- degree_counts |>
+    filter(is.finite(degree), is.finite(count), degree >= 2, count > 0)
+  values <- rep(degree_counts$degree, degree_counts$count)
+  k_min <- min(values)
+  p <- 1 / (mean(values - k_min) + 1)
+  theta <- 1 - p
+  line <- tibble(degree = seq.int(k_min, max(values))) |>
+    mutate(count = length(values) * p * theta^(degree - k_min))
+  list(theta = theta, p = p, k_min = k_min, n = length(values), line = line)
+}
+
+empirical_trial_fit <- fit_shifted_geometric(empirical_degrees$trial)
+if (!rebuild_old_database && file.exists(old_trial_fit_cache_file)) {
+  old_trial_fit <- readRDS(old_trial_fit_cache_file)
+} else {
+  old_trial_fit <- fit_shifted_geometric(old_degrees$trial)
+  saveRDS(old_trial_fit, old_trial_fit_cache_file)
+}
+```
+
+```{r plot-and-fit-helpers, include=FALSE}
+metric_numerics <- function(metric) {
+  comparison_data |>
+    filter(is.finite(.data[[metric]])) |>
+    group_by(Data) |>
+    summarise(
+      Networks = n(), Minimum = min(.data[[metric]]),
+      Mean = mean(.data[[metric]]), Maximum = max(.data[[metric]]),
+      .groups = "drop"
+    )
+}
+
+fit_parameters <- function(
+  data, response, predictors, log_y = FALSE, relationship = NULL
+) {
+  predictor_labels <- names(predictors)
+  if (is.null(predictor_labels) || any(predictor_labels == "")) {
+    predictor_labels <- predictors
+  }
+  bind_rows(lapply(seq_along(predictors), function(i) {
+    predictor <- unname(predictors[i])
+    model_data <- data |>
+      filter(
+        is.finite(.data[[response]]), is.finite(.data[[predictor]]),
+        .data[[predictor]] > 0
+      )
+    if (log_y) {
+      model_data <- model_data |> filter(.data[[response]] > 0)
+    }
+    model_data |>
+      group_by(Data) |>
+      group_modify(function(group_data, key) {
+        x_fit <- log10(group_data[[predictor]])
+        y_fit <- if (log_y) log10(group_data[[response]]) else group_data[[response]]
+        model <- lm(y_fit ~ x_fit)
+        tibble(
+          Relationship = relationship %||% response,
+          `X-axis` = predictor_labels[i],
+          `Y-axis` = if (log_y) paste0("log10(", response, ")") else response,
+          Slope = unname(coef(model)[2]),
+          Intercept = unname(coef(model)[1]),
+          `R-squared` = summary(model)$r.squared,
+          Observations = nrow(group_data)
+        )
+      }) |>
+      ungroup()
+  }))
+}
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+show_parameters <- function(parameters, caption = "Fitted-line parameters") {
+  knitr::kable(parameters, digits = 3, caption = caption)
+}
+
+metric_histogram <- function(metric, label, binwidth, boundary = 0) {
+  ggplot() +
+    geom_histogram(
+      data = filter(comparison_data, Data == "2000-2019 Database", is.finite(.data[[metric]])),
+      aes(x = .data[[metric]], fill = Data),
+      colour = "grey15", linewidth = 0.25, alpha = comparison_alpha[["2000-2019 Database"]],
+      binwidth = binwidth, boundary = boundary, position = "identity"
+    ) +
+    geom_histogram(
+      data = filter(comparison_data, Data == "2023 Sample", is.finite(.data[[metric]])),
+      aes(x = .data[[metric]], fill = Data),
+      colour = "grey15", linewidth = 0.25, alpha = comparison_alpha[["2023 Sample"]],
+      binwidth = binwidth, boundary = boundary, position = "identity"
+    ) +
+    scale_fill_manual(values = comparison_colors, name = "Data") +
+    labs(x = label, y = "Number of networks")
+}
+
+metric_scatter <- function(
+  metric, predictor, metric_label, predictor_label,
+  log_y = FALSE, fitted_line = TRUE
+) {
+  plot_data <- comparison_data |>
+    filter(
+      is.finite(.data[[metric]]), is.finite(.data[[predictor]]),
+      .data[[predictor]] > 0
+    )
+  if (log_y) plot_data <- plot_data |> filter(.data[[metric]] > 0)
+
+  plot <- ggplot(
+    plot_data,
+    aes(x = .data[[predictor]], y = .data[[metric]], fill = Data, colour = Data)
+  ) +
+    geom_count(
+      aes(size = after_stat(n)), shape = 21, colour = "grey15",
+      stroke = 0.35, alpha = 0.75
+    ) +
+    scale_fill_manual(values = comparison_colors, name = "Data") +
+    scale_colour_manual(values = comparison_colors, guide = "none") +
+    scale_size_area(max_size = 8, name = "Count") +
+    scale_x_log10(labels = plain_log_labels) +
+    labs(x = predictor_label, y = metric_label)
+  if (fitted_line) {
+    plot <- plot + geom_smooth(
+      aes(colour = Data), method = "lm", formula = y ~ x,
+      se = FALSE, linewidth = 0.9, show.legend = FALSE
+    )
+  }
+  if (log_y) plot <- plot + scale_y_log10(labels = plain_log_labels)
+  plot
+}
+
+make_metric_figure <- function(
+  metric, label, binwidth, bipartite, log_y,
+  fitted_line = TRUE, histogram_boundary = 0
+) {
+  histogram <- metric_histogram(
+    metric, label, binwidth, boundary = histogram_boundary
+  ) + labs(title = "(a)")
+  versus_N <- metric_scatter(
+    metric, "N_treatments", label, "Number of treatments",
+    log_y = log_y, fitted_line = fitted_line
+  ) + labs(title = "(b)")
+  if (!bipartite) {
+    return(histogram + versus_N + plot_layout(widths = c(1, 1.18)))
+  }
+  versus_M <- metric_scatter(
+    metric, "N_total_trials", label, "Number of trials",
+    log_y = log_y, fitted_line = fitted_line
+  ) + labs(title = "(c)")
+  histogram + versus_N + versus_M + plot_layout(nrow = 1, guides = "collect")
+}
+
+metric_parameters <- function(metric, bipartite, log_y, label) {
+  predictors <- c("Number of treatments" = "N_treatments")
+  if (bipartite) predictors <- c(predictors, "Number of trials" = "N_total_trials")
+  fit_parameters(comparison_data, metric, predictors, log_y, label)
+}
+```
+
+# Network-type comparison
+
+```{r network-type-comparison, fig.width=8, fig.height=4}
+network_type_levels <- c("looped", "star", "tree", "disconnected")
+network_type_labels <- c("Looped", "Star", "Non-star tree", "Disconnected")
+network_type_data <- comparison_data |>
+  transmute(
+    Data,
+    type = factor(type, levels = network_type_levels, labels = network_type_labels)
+  ) |>
+  count(Data, type, name = "Networks", .drop = FALSE)
+
+p_network_types <- ggplot(
+  network_type_data,
+  aes(x = type, y = Networks, fill = Data, alpha = Data)
+) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.68) +
+  scale_fill_manual(values = comparison_colors, name = "Data") +
+  scale_alpha_manual(values = comparison_alpha, guide = "none") +
+  labs(x = "Network type", y = "Number of networks")
+p_network_types
+knitr::kable(network_type_data, caption = "Network types in both databases")
+```
+
+# Degree-distribution comparison
+
+Panel (b) contains separate maximum-likelihood shifted-geometric fits. Panels
+(a) and (c) contain no fitted lines.
+
+```{r degree-distribution-comparison, fig.width=12, fig.height=4}
+degree_comparison <- function(empirical_counts, old_counts) {
+  bind_rows(
+    old_counts |> mutate(Data = "2000-2019 Database"),
+    empirical_counts |> mutate(Data = "2023 Sample")
+  ) |>
+    filter(is.finite(degree), is.finite(count), degree > 0, count > 0) |>
+    mutate(Data = factor(Data, levels = names(comparison_colors)))
+}
+
+degree_unipartite <- degree_comparison(empirical_degrees$unipartite, old_degrees$unipartite)
+degree_trial <- degree_comparison(empirical_degrees$trial, old_degrees$trial) |>
+  filter(degree >= 2)
+degree_treatment <- degree_comparison(empirical_degrees$treatment, old_degrees$treatment)
+
+degree_point_plot <- function(data, x_label, y_label, title) {
+  ggplot(data, aes(degree, count, colour = Data)) +
+    geom_point(size = 1.8) +
+    scale_colour_manual(values = comparison_colors, name = "Data") +
+    scale_x_log10(labels = plain_log_labels) +
+    scale_y_log10(labels = plain_log_labels) +
+    labs(title = title, x = x_label, y = y_label)
+}
+
+p_degree_unipartite <- degree_point_plot(
+  degree_unipartite, x_label_unipartite_degree, "Number of treatments", "(a)"
+)
+
+trial_fit_lines <- bind_rows(
+  old_trial_fit$line |> mutate(Data = "2000-2019 Database"),
+  empirical_trial_fit$line |> mutate(Data = "2023 Sample")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_degree_trial <- ggplot(degree_trial, aes(degree, count, colour = Data, fill = Data)) +
+  geom_col(position = "dodge", alpha = 0.65) +
+  geom_point(position = position_dodge(width = 0.9), size = 1.8) +
+  geom_line(
+    data = trial_fit_lines,
+    aes(degree, count, colour = Data, group = Data),
+    linetype = "dashed", linewidth = 0.9
+  ) +
+  scale_colour_manual(values = degree_fit_colors, name = "Data") +
+  scale_fill_manual(values = comparison_colors, name = "Data") +
+  scale_y_log10(
+    breaks = 10^(-1:4),
+    labels = function(x) ifelse(x == 0.1, "0", plain_log_labels(x))
+  ) +
+  coord_cartesian(ylim = c(0.1, 10000)) +
+  labs(title = "(b)", x = x_label_bipartite_trial_degree, y = "Number of trials")
+
+p_degree_treatment <- degree_point_plot(
+  degree_treatment, x_label_bipartite_treatment_degree, "Number of treatments", "(c)"
+)
+
+p_degree_comparison <- p_degree_unipartite + p_degree_trial + p_degree_treatment +
+  plot_layout(nrow = 1, guides = "collect") & theme(legend.position = "bottom")
+p_degree_comparison
+
+degree_fit_parameters <- tibble(
+  Data = factor(c("2000-2019 Database", "2023 Sample"), levels = names(comparison_colors)),
+  theta = c(old_trial_fit$theta, empirical_trial_fit$theta),
+  p = c(old_trial_fit$p, empirical_trial_fit$p),
+  `Minimum degree` = c(old_trial_fit$k_min, empirical_trial_fit$k_min),
+  Observations = c(old_trial_fit$n, empirical_trial_fit$n)
+)
+knitr::kable(
+  degree_fit_parameters, digits = 4,
+  caption = "Shifted-geometric fitted parameters for panel (b)"
+)
+```
+
+# Edge multiplicity
+
+```{r edge-multiplicity, fig.width=11, fig.height=4}
+edge_multiplicity_comparison <- bind_rows(
+  old_edge_multiplicity |> transmute(multi, count, Data = "2000-2019 Database"),
+  empirical_edge_multiplicity |> transmute(multi, count, Data = "2023 Sample")
+) |>
+  filter(is.finite(multi), is.finite(count), multi >= 1, count > 0) |>
+  group_by(Data, multi) |>
+  summarise(count = sum(count), .groups = "drop") |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+edge_counts_per_network <- bind_rows(
+  old_edge_multiplicity |>
+    group_by(network_id) |>
+    summarise(number_of_edges = sum(count), .groups = "drop") |>
+    mutate(Data = "2000-2019 Database"),
+  empirical_edge_multiplicity |>
+    group_by(network_id) |>
+    summarise(number_of_edges = sum(count), .groups = "drop") |>
+    mutate(Data = "2023 Sample")
+) |>
+  mutate(Data = factor(Data, levels = names(comparison_colors)))
+
+p_edge_multiplicity <- ggplot(
+  edge_multiplicity_comparison, aes(multi, count, colour = Data)
+) +
+  geom_point(size = 1.8) +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  scale_colour_manual(values = comparison_colors, name = "Data") +
+  labs(x = "Edge multiplicity", y = "Number of unipartite edges", title = "(a)")
+
+p_edge_count_distribution <- ggplot(
+  edge_counts_per_network, aes(number_of_edges, fill = Data)
+) +
+  geom_histogram(
+    colour = "grey15", linewidth = 0.25, alpha = 0.70,
+    binwidth = 10, boundary = 0, position = "identity"
+  ) +
+  scale_fill_manual(values = comparison_colors, name = "Data") +
+  labs(x = "Number of unipartite edges", y = "Number of networks", title = "(b)")
+
+p_edge_multiplicity_comparison <- p_edge_multiplicity + p_edge_count_distribution +
+  plot_layout(widths = c(1, 1.18), guides = "collect")
+p_edge_multiplicity_comparison
+
+edge_multiplicity_summary <- edge_multiplicity_comparison |>
+  group_by(Data) |>
+  summarise(
+    Edges = sum(count),
+    `Proportion below 5` = sum(count[multi < 5]) / Edges,
+    Minimum = min(multi), Maximum = max(multi), .groups = "drop"
+  )
+knitr::kable(edge_multiplicity_summary, digits = 3)
+```
+
+
+# Density
+
+## Unipartite
+
+```{r density-unipartite, fig.width=12, fig.height=4}
+p_density <- make_metric_figure(
+  "density", "Network density (Unipartite)", 0.05, FALSE, TRUE
+)
+p_density
+show_parameters(metric_parameters("density", FALSE, TRUE, "Unipartite density"))
+knitr::kable(metric_numerics("density"), digits = 3)
+```
+
+## Bipartite
+
+```{r density-bipartite, fig.width=12, fig.height=5}
+p_bi_density <- make_metric_figure(
+  "bi_density", "Network density (Bipartite)", 0.05, TRUE, TRUE
+)
+p_bi_density
+show_parameters(metric_parameters("bi_density", TRUE, TRUE, "Bipartite density"))
+knitr::kable(metric_numerics("bi_density"), digits = 3)
+```
+
+# Average path length
+
+## Unipartite
+
+```{r apl-unipartite, fig.width=12, fig.height=4}
+p_apl <- make_metric_figure(
+  "avg_path_length", "Average path length (Unipartite)", 0.1, FALSE, FALSE
+)
+p_apl
+show_parameters(metric_parameters(
+  "avg_path_length", FALSE, FALSE, "Unipartite average path length"
+))
+knitr::kable(metric_numerics("avg_path_length"), digits = 3)
+```
+
+## Unipartite diameter
+
+```{r diameter-unipartite, fig.width=12, fig.height=4}
+diameter_data <- comparison_data |>
+  filter(is.finite(diameter), is.finite(avg_path_length))
+
+p_diameter_bar <- ggplot(diameter_data, aes(factor(diameter), fill = Data)) +
+  geom_bar(position = "dodge", colour = "grey15", linewidth = 0.25) +
+  scale_fill_manual(values = comparison_colors, name = "Data") +
+  labs(x = "Diameter (Unipartite)", y = "Number of networks", title = "(a)")
+
+p_diameter_apl <- ggplot(
+  diameter_data,
+  aes(avg_path_length, diameter, fill = Data, size = after_stat(n))
+) +
+  geom_count(shape = 21, colour = "grey15", alpha = 0.8) +
+  scale_fill_manual(values = comparison_colors, name = "Data") +
+  scale_size_area(max_size = 8, name = "Count") +
+  labs(
+    x = "Average path length (Unipartite)",
+    y = "Diameter (Unipartite)", title = "(b)"
+  )
+
+p_diameter <- p_diameter_bar + p_diameter_apl +
+  plot_layout(widths = c(1, 1.18), guides = "collect")
+p_diameter
+knitr::kable(metric_numerics("diameter"), digits = 3)
+```
+
+
+
+
+# Clustering coefficient
+
+## Unipartite
+
+```{r clustering-unipartite, fig.width=12, fig.height=4}
+p_clustering <- make_metric_figure(
+  "unipartite_c", "Clustering coefficient (Unipartite)", 0.05, FALSE, FALSE
+)
+p_clustering
+show_parameters(metric_parameters(
+  "unipartite_c", FALSE, FALSE, "Unipartite clustering coefficient"
+))
+knitr::kable(metric_numerics("unipartite_c"), digits = 3)
+```
+
+```{r clustering-predictor-regressions, fig.width=12, fig.height=5}
+p_clustering_density <- metric_scatter(
+  "unipartite_c", "density", "Clustering coefficient (Unipartite)",
+  "Network density (Unipartite)"
+) + labs(title = "(a)")
+p_clustering_irregularity <- metric_scatter(
+  "unipartite_c", "deg_irreg", "Clustering coefficient (Unipartite)",
+  "Degree irregularity (Unipartite)"
+) + labs(title = "(b)")
+p_clustering_predictors <- p_clustering_density + p_clustering_irregularity +
+  plot_layout(guides = "collect")
+p_clustering_predictors
+show_parameters(fit_parameters(
+  comparison_data, "unipartite_c",
+  c("Unipartite density" = "density", "Unipartite degree irregularity" = "deg_irreg"),
+  FALSE, "Unipartite clustering coefficient"
+))
+```
+
+
+
+# Degree assortativity
+
+## Unipartite
+
+```{r assortativity-unipartite, fig.width=12, fig.height=4}
+p_assortativity <- make_metric_figure(
+  "assortativity", "Degree assortativity (Unipartite)", 0.1, FALSE, FALSE
+)
+p_assortativity
+show_parameters(metric_parameters(
+  "assortativity", FALSE, FALSE, "Unipartite degree assortativity"
+))
+knitr::kable(metric_numerics("assortativity"), digits = 3)
+```
+
+## Bipartite
+
+As in `metrics comparison.Rmd`, no fitted line is added to this figure.
+
+```{r assortativity-bipartite, fig.width=12, fig.height=5}
+p_bi_assortativity <- make_metric_figure(
+  "bi_assortativity", "Bipartite degree assortativity", 0.1, TRUE, FALSE,
+  fitted_line = FALSE
+)
+p_bi_assortativity
+knitr::kable(metric_numerics("bi_assortativity"), digits = 3)
+```
+
+
+# Degree irregularity
+
+## Unipartite
+
+```{r irregularity-unipartite, fig.width=12, fig.height=4}
+p_irregularity <- make_metric_figure(
+  "deg_irreg", "Degree irregularity (Unipartite)", 0.5, FALSE, TRUE
+)
+p_irregularity
+show_parameters(metric_parameters(
+  "deg_irreg", FALSE, TRUE, "Unipartite degree irregularity"
+))
+knitr::kable(metric_numerics("deg_irreg"), digits = 3)
+```
+
+## Bipartite trials
+
+As in `metrics comparison.Rmd`, no fitted lines are added to this figure.
+
+```{r irregularity-bipartite-trials, fig.width=12, fig.height=5}
+p_bi_trial_irregularity <- make_metric_figure(
+  "bi_trial_deg_irreg", "Degree irregularity (Bipartite trials)", 0.02,
+  TRUE, TRUE, fitted_line = FALSE
+)
+p_bi_trial_irregularity
+knitr::kable(metric_numerics("bi_trial_deg_irreg"), digits = 3)
+```
+
+## Bipartite treatments
+
+```{r irregularity-bipartite-treatments, fig.width=12, fig.height=5}
+p_bi_treatment_irregularity <- make_metric_figure(
+  "bi_treatment_deg_irreg", "Degree irregularity (Bipartite treatments)",
+  0.5, TRUE, TRUE
+)
+p_bi_treatment_irregularity
+show_parameters(metric_parameters(
+  "bi_treatment_deg_irreg", TRUE, TRUE,
+  "Bipartite treatment-degree irregularity"
+))
+knitr::kable(metric_numerics("bi_treatment_deg_irreg"), digits = 3)
+```
+
+# Requested histogram panels
+
+The following figures contain only the overlaid metric distributions for the
+old database and empirical samples. They are displayed below.
+
+```{r requested-histogram-panels, fig.width=12, fig.height=5}
+combine_histograms <- function(..., nrow = 1) {
+  wrap_plots(..., nrow = nrow, guides = "collect") &
+    theme(legend.position = "bottom")
+}
+
+
+
+p_old_density_histograms <- combine_histograms(
+  metric_histogram(
+    "density", "Network density (Unipartite)", 0.05
+  ) + labs(title = "(a)"),
+  metric_histogram(
+    "bi_density", "Network density (Bipartite)", 0.05
+  ) + labs(title = "(b)")
+)
+
+p_old_clustering_apl_histograms <- combine_histograms(
+  metric_histogram(
+    "unipartite_c", "Clustering coefficient (Unipartite)", 0.05
+  ) + labs(title = "(a)"),
+  metric_histogram(
+    "avg_path_length", "Average path length (Unipartite)", 0.1
+  ) + labs(title = "(b)")
+)
+
+p_old_assortativity_histograms <- combine_histograms(
+  metric_histogram(
+    "assortativity", "Degree assortativity (Unipartite)", 0.1
+  ) + labs(title = "(a)"),
+  metric_histogram(
+    "bi_assortativity", "Degree assortativity (Bipartite)", 0.1
+  ) + labs(title = "(b)")
+)
+
+p_old_irregularity_histograms <- combine_histograms(
+  metric_histogram(
+    "deg_irreg", "Degree irregularity (Unipartite)", 0.5
+  ) + labs(title = "(a)"),
+  metric_histogram(
+    "bi_trial_deg_irreg", "Trial-degree irregularity (Bipartite)", 0.02
+  ) + labs(title = "(b)"),
+  metric_histogram(
+    "bi_treatment_deg_irreg", "Treatment-degree irregularity (Bipartite)", 1
+  ) + labs(title = "(c)")
+)
+
+p_old_MN_scatter <- ggplot() +
+  geom_count(
+    data = filter(comparison_data, Data == "2000-2019 Database"),
+    aes(
+      x = N_treatments, y = N_total_trials,
+      fill = Data, size = after_stat(n)
+    ),
+    shape = 21, colour = "grey15", stroke = 0.35,
+    alpha = comparison_alpha[["2000-2019 Database"]]
+  ) +
+  geom_count(
+    data = filter(comparison_data, Data == "2023 Sample"),
+    aes(
+      x = N_treatments, y = N_total_trials,
+      fill = Data, size = after_stat(n)
+    ),
+    shape = 21, colour = "grey15", stroke = 0.35,
+    alpha = comparison_alpha[["2023 Sample"]]
+  ) +
+  scale_fill_manual(values = comparison_colors, guide = "none") +
+  scale_size_area(max_size = 8, name = "Count") +
+  scale_x_log10(labels = plain_log_labels) +
+  scale_y_log10(labels = plain_log_labels) +
+  labs(
+    title = "(c)", x = "Number of treatments (N)",
+    y = "Number of trials (M)"
+  )
+
+p_old_MN_comparison <- combine_histograms(
+  metric_histogram(
+    "N_total_trials", "Number of trials (M)", 10
+  ) + labs(title = "(a)"),
+  metric_histogram(
+    "N_treatments", "Number of treatments (N)", 2, boundary = 4
+  ) + labs(title = "(b)"),
+  p_old_MN_scatter
+)
+
+
+
+
+p_old_density_histograms
+p_old_clustering_apl_histograms
+p_old_assortativity_histograms
+p_old_irregularity_histograms
+p_old_MN_comparison
+
+arms_summary <- comparison_data |>
+  group_by(Data) |>
+  summarise(
+    Median = median(number_of_arms),
+    Q1 = unname(quantile(number_of_arms, 0.25)),
+    Q3 = unname(quantile(number_of_arms, 0.75)),
+    IQR = IQR(number_of_arms),
+    .groups = "drop"
+  ) |>
+  mutate(`Median (Q1–Q3)` = sprintf("%g (%g–%g)", Median, Q1, Q3)) |>
+  select(Data, `Median (Q1–Q3)`, IQR)
+knitr::kable(arms_summary, caption = "Number of arms per network: median and IQR")
+```

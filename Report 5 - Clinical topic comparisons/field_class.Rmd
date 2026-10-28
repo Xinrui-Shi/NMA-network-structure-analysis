@@ -1,0 +1,1057 @@
+---
+title: "Empirical Network Comparison by Clinical Topic"
+author: "Xinrui Shi"
+date: "2026-08-28"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    df_print: paged
+    self_contained: true
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+figure_dir <- file.path(tempdir(), "nma-report-5-figures")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+if (!dir.exists(figure_dir) || file.access(figure_dir, 2) != 0) {
+  stop("Cannot write to the temporary figure directory: ", figure_dir)
+}
+figure_dir <- normalizePath(figure_dir, winslash = "/", mustWork = TRUE)
+knitr::opts_chunk$set(
+  fig.path = paste0(figure_dir, "/"),
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 5,
+  dpi = 150
+)
+
+library(dplyr)
+library(ggplot2)
+library(igraph)
+library(knitr)
+library(patchwork)
+library(purrr)
+library(scales)
+library(tnet)
+library(tidyr)
+
+input_file <- knitr::current_input(dir = TRUE)
+input_dir <- if (length(input_file) == 1L && nzchar(input_file)) {
+  dirname(input_file)
+} else {
+  getwd()
+}
+project_file <- "NMA network structure analysis.Rproj"
+report_dir <- if (file.exists(file.path(input_dir, project_file))) {
+  input_dir
+} else if (file.exists(file.path(input_dir, "..", project_file))) {
+  normalizePath(file.path(input_dir, ".."), winslash = "/", mustWork = TRUE)
+} else {
+  stop("Open NMA network structure analysis.Rproj before running this report.")
+}
+empirical_result_dir <- file.path(report_dir, "Empirical data", "results")
+comparison_result_dir <- file.path(
+  report_dir, "Report 5 - Clinical topic comparisons", "results"
+)
+dir.create(comparison_result_dir, recursive = TRUE, showWarnings = FALSE)
+
+empirical_networks_file <- file.path(
+  empirical_result_dir,
+  "empirical_incidence_networks.rds"
+)
+metric_functions_file <- file.path(
+  report_dir, "Common R functions", "metric_functions.R"
+)
+field_metadata_file <- file.path(
+  report_dir, "Empirical data", "metadata", "network_summary_report.csv"
+)
+
+if (!file.exists(empirical_networks_file)) {
+  stop("Empirical network file not found: ", empirical_networks_file)
+}
+if (!file.exists(metric_functions_file)) {
+  stop("Metric functions file not found: ", metric_functions_file)
+}
+if (!file.exists(field_metadata_file)) {
+  stop("Clinical Topic metadata file not found: ", field_metadata_file)
+}
+
+plot_theme <- theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank()
+  )
+theme_set(plot_theme)
+significance_threshold <- 0.10
+minimum_field_size <- 25L
+```
+
+# Aim and data boundary
+
+This report reproduces the comparison of networks across Clinical Topics using
+only the 300 empirical networks. Clinical Topic codes are read from the empirical
+database summary, but no metric value is read from that file. All retained
+metrics are recomputed during rendering from the saved empirical incidence
+matrices by `compute_metrics_for_networks()` in `metric_functions.R`.
+
+For this analysis, a Clinical Topic is included in the comparison when it
+contains at least `r minimum_field_size` empirical networks. Each selected
+Clinical Topic is also compared with the distribution across all 300 empirical
+networks. The latter comparisons are exploratory because a selected Clinical
+Topic is a subset of the overall empirical distribution.
+
+# Read and validate empirical inputs
+
+```{r read-and-validate}
+source(metric_functions_file)
+empirical_networks <- readRDS(empirical_networks_file)
+empirical_metrics <- compute_metrics_for_networks(empirical_networks)
+field_metadata <- read.csv(
+  field_metadata_file,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+) %>%
+  select(network_id, field) %>%
+  distinct()
+
+if (anyDuplicated(empirical_metrics$network_id)) {
+  stop("network_id is not unique in empirical_metrics.rds.")
+}
+if (anyDuplicated(field_metadata$network_id)) {
+  stop("network_id is not unique in the Clinical Topic metadata.")
+}
+if (!"network_id" %in% names(empirical_metrics)) {
+  stop("Computed empirical metrics must contain network_id.")
+}
+
+unmatched_metrics <- anti_join(
+  empirical_metrics %>% select(network_id),
+  field_metadata,
+  by = "network_id"
+)
+if (nrow(unmatched_metrics) > 0L) {
+  stop("Some empirical networks have no Clinical Topic classification.")
+}
+
+mean_degree_metric_names <- c(
+  "mean_unipartite_unweighted_degree",
+  "mean_bipartite_trial_degree",
+  "mean_bipartite_treatment_degree"
+)
+
+metric_names <- c(
+  "density",
+  "bi_density",
+  mean_degree_metric_names,
+  "avg_path_length",
+  "unipartite_c",
+  "assortativity",
+  "bi_assortativity",
+  "deg_irreg",
+  "bi_trial_deg_irreg",
+  "bi_treatment_deg_irreg",
+  "N_treatments",
+  "N_total_trials",
+  "number_of_arms",
+  "number_of_distinct_treatment_comparisons"
+)
+missing_metrics <- setdiff(metric_names, names(empirical_metrics))
+if (length(missing_metrics) > 0L) {
+  stop(
+    "Requested metrics are missing from metric_functions.R output: ",
+    paste(missing_metrics, collapse = ", ")
+  )
+}
+non_numeric_metrics <- metric_names[
+  !vapply(empirical_metrics[metric_names], is.numeric, logical(1))
+]
+if (length(non_numeric_metrics) > 0L) {
+  stop(
+    "Metric columns must be numeric: ",
+    paste(non_numeric_metrics, collapse = ", ")
+  )
+}
+
+analysis_data <- empirical_metrics %>% 
+  inner_join(field_metadata, by = "network_id") # %>% 
+  #subset(field<=26)
+
+stopifnot(nrow(analysis_data) == nrow(empirical_metrics))
+```
+
+The analysis contains `r nrow(analysis_data)` empirical networks and the
+`r length(metric_names)` retained metrics computed by `metric_functions.R`.
+`N_total_trials` is reported as the number of trials.
+The number of arms counts trial--treatment edges in the bipartite graph;
+the number of distinct treatment comparisons counts unique edges in the
+unipartite treatment projection.
+
+# Clinical Topic labels and eligible Clinical Topics
+
+```{r field-labels}
+icd_labels_1_26 <- c(
+  "Certain infectious or parasitic diseases",
+  "Neoplasms",
+  "Diseases of the blood or blood-forming organs",
+  "Diseases of the immune system",
+  "Endocrine, nutritional or metabolic diseases",
+  "Mental, behavioural or neurodevelopmental disorders",
+  "Sleep-wake disorders",
+  "Diseases of the nervous system",
+  "Diseases of the visual system",
+  "Diseases of the ear or mastoid process",
+  "Diseases of the circulatory system",
+  "Diseases of the respiratory system",
+  "Diseases of the digestive system",
+  "Diseases of the skin",
+  "Diseases of the musculoskeletal system or connective tissue",
+  "Diseases of the genitourinary system",
+  "Conditions related to sexual health",
+  "Pregnancy, childbirth or the puerperium",
+  "Certain conditions originating in the perinatal period",
+  "Developmental anomalies",
+  "Symptoms, signs or clinical findings, not elsewhere classified",
+  "Injury, poisoning or certain other consequences of external causes",
+  "External causes of morbidity or mortality",
+  "Factors influencing health status or contact with health services",
+  "Codes for special purposes",
+  "Supplementary Clinical Topic Traditional Medicine Conditions - Module I"
+)
+
+field_lookup <- tibble(
+  field = 1:30,
+  field_label_full = c(
+    paste0(sprintf("%02d", 1:26), ": ", icd_labels_1_26),
+    "Dentistry", "Education", "Other medical", "Other non-medical"
+  ),
+  field_label_short = c(
+    sprintf("%02d", 1:26),
+    "Dentistry", "Education", "Other medical", "Other non-medical"
+  )
+)
+
+analysis_data <- analysis_data %>%
+  left_join(field_lookup, by = "field") %>%
+  mutate(
+    field_label_full = if_else(
+      is.na(field_label_full), sprintf("%02d", field), field_label_full
+    ),
+    field_label_short = if_else(
+      is.na(field_label_short), sprintf("%02d", field), field_label_short
+    )
+  )
+
+field_counts <- analysis_data %>%
+  count(field, field_label_full, field_label_short, name = "n_networks") %>%
+  arrange(field)
+
+selected_fields <- field_counts %>%
+  filter(n_networks >= minimum_field_size)
+field_levels <- selected_fields$field_label_short
+
+write.csv(
+  field_counts,
+  file.path(comparison_result_dir, "empirical_field_counts.csv"),
+  row.names = FALSE
+)
+
+selected_fields %>%
+  select(field, n_networks, field_label_full, field_label_short) %>%
+  kable(
+    col.names = c(
+      "Clinical Topic code", "Number of networks",
+      "Full Clinical Topic label", "Plot label"
+    ),
+    caption = paste(
+      "Empirical Clinical Topics with at least", minimum_field_size, "networks"
+    )
+  )
+```
+
+```{r field-count-plot, fig.height=7}
+field_count_plot <- field_counts %>%
+  mutate(
+    field_count_y_label = if_else(
+      field <= 26,
+      paste0("ICD | ", field_label_full),
+      paste0("Non-ICD | ", field_label_full)
+    ),
+    field_count_y_label = factor(
+      field_count_y_label,
+      levels = rev(unique(field_count_y_label))
+    )
+  ) %>%
+  ggplot(aes(x = n_networks, y = field_count_y_label)) +
+  geom_col(fill = "grey70", color = "grey30") +
+  geom_vline(
+    xintercept = minimum_field_size,
+    linetype = "dashed",
+    color = "#B2182B"
+  ) +
+  labs(x = "Number of empirical networks", y = "Clinical Topic")
+
+print(field_count_plot)
+```
+
+# Analysis data
+
+```{r prepare-analysis-data}
+metric_labels <- c(
+  density = "Density (Unipartite)",
+  bi_density = "Density (Bipartite)",
+  mean_unipartite_unweighted_degree = "Mean treatment degree (Unipartite)",
+  mean_bipartite_trial_degree = "Mean trial degree (Bipartite)",
+  mean_bipartite_treatment_degree = "Mean treatment degree (Bipartite)",
+  avg_path_length = "Average path length (Unipartite)",
+  unipartite_c = "Clustering coefficient (Unipartite)",
+  assortativity = "Degree assortativity (Unipartite)",
+  bi_assortativity = "Degree assortativity (Bipartite)",
+  deg_irreg = "Degree irregularity (Unipartite)",
+  bi_trial_deg_irreg = "Trial-degree irregularity (Bipartite)",
+  bi_treatment_deg_irreg = "Treatment-degree irregularity (Bipartite)",
+  N_treatments = "Number of treatments",
+  N_total_trials = "Number of trials",
+  number_of_arms = "Number of arms (bipartite edges)",
+  number_of_distinct_treatment_comparisons =
+    "Number of distinct treatment comparisons (unipartite edges)"
+)
+
+missing_labels <- setdiff(metric_names, names(metric_labels))
+if (length(missing_labels) > 0L) {
+  metric_labels[missing_labels] <- gsub("_", " ", missing_labels)
+}
+
+field_palette <- setNames(hue_pal()(length(field_levels)), field_levels)
+overall_fill <- "grey70"
+
+distribution_label_lookup <- c(
+  "02" = "Neoplasms",
+  "06" = "Mental Health",
+  "11" = "Circulation",
+  "13" = "Digestion",
+  "21" = "Symptoms"
+)
+distribution_field_levels <- recode(
+  field_levels,
+  !!!distribution_label_lookup,
+  .default = field_levels
+)
+distribution_palette <- setNames(
+  unname(field_palette[field_levels]),
+  distribution_field_levels
+)
+
+metric_long <- analysis_data %>%
+  select(
+    network_id, field, field_label_full, field_label_short,
+    all_of(metric_names)
+  ) %>%
+  pivot_longer(
+    cols = all_of(metric_names),
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+  filter(is.finite(value))
+
+field_metric_long <- metric_long %>%
+  filter(field %in% selected_fields$field) %>%
+  mutate(
+    field_label_short = factor(field_label_short, levels = field_levels)
+  )
+
+overall_metric_long <- metric_long %>%
+  transmute(network_id, metric, value, field_label_short = "Overall")
+
+boxplot_metric_long <- bind_rows(
+  field_metric_long %>%
+    select(network_id, metric, value, field_label_short),
+  overall_metric_long
+) %>%
+  mutate(
+    field_label_short = factor(
+      field_label_short,
+      levels = c(field_levels, "Overall")
+    )
+  )
+
+distribution_field_metric_long <- field_metric_long %>%
+  mutate(
+    field_label_plot = recode(
+      as.character(field_label_short),
+      !!!distribution_label_lookup,
+      .default = as.character(field_label_short)
+    ),
+    field_label_plot = factor(
+      field_label_plot,
+      levels = distribution_field_levels
+    )
+  )
+
+distribution_boxplot_metric_long <- boxplot_metric_long %>%
+  mutate(
+    field_label_plot = recode(
+      as.character(field_label_short),
+      !!!distribution_label_lookup,
+      .default = as.character(field_label_short)
+    ),
+    field_label_plot = factor(
+      field_label_plot,
+      levels = c(distribution_field_levels, "Overall")
+    )
+  )
+```
+
+# Trial--treatment dimensions
+
+The grey layer shows the joint \((M,N)\) distribution across all empirical
+networks. The colored layer identifies the five selected Clinical Topics. Here, \(M\)
+is the number of trials and \(N\) is the number of treatments; point area is
+proportional to the number of networks at the same \((M,N)\) coordinate.
+
+```{r field-MN-scatter, fig.width=8, fig.height=6}
+overall_mn_counts <- analysis_data %>%
+  transmute(
+    M = N_total_trials,
+    N = N_treatments
+  ) %>%
+  filter(is.finite(M), is.finite(N), M > 0, N > 0) %>%
+  count(M, N, name = "n_networks")
+
+field_mn_counts <- analysis_data %>%
+  filter(field %in% selected_fields$field) %>%
+  transmute(
+    field_label_short = factor(field_label_short, levels = field_levels),
+    M = N_total_trials,
+    N = N_treatments
+  ) %>%
+  filter(is.finite(M), is.finite(N), M > 0, N > 0) %>%
+  count(field_label_short, M, N, name = "n_networks")
+
+mn_scatter_plot <- ggplot() +
+  geom_point(
+    data = overall_mn_counts,
+    aes(
+      x = N,
+      y = M,
+      size = n_networks,
+      fill = "All networks"
+    ),
+    shape = 21,
+    color = "grey45",
+    stroke = 0.3,
+    alpha = 0.55
+  ) +
+  geom_point(
+    data = field_mn_counts,
+    aes(
+      x = N,
+      y = M,
+      size = n_networks,
+      fill = field_label_short
+    ),
+    shape = 21,
+    color = "white",
+    stroke = 0.35,
+    alpha = 0.85
+  ) +
+  scale_fill_manual(
+    values = c("All networks" = "grey75", field_palette),
+    breaks = c("All networks", field_levels),
+    drop = FALSE,
+    name = "Network set"
+  ) +
+  scale_size_area(
+    max_size = 10,
+    breaks = scales::breaks_pretty(n = 4),
+    name = "Networks at (M,N)"
+  ) +
+  scale_x_log10(
+    limits = c(4, NA),
+    breaks = c(4, 5, 10, 20, 50),
+    labels = label_number()
+  ) +
+  scale_y_log10(
+    limits = c(2, NA),
+    breaks = c(2, 5, 10, 20, 50, 100, 200),
+    labels = label_number()
+  ) +
+  labs(
+    title = "Trial--treatment dimensions by selected Clinical Topic",
+    x = expression(N~"(number of treatments)"),
+    y = expression(M~"(number of trials)")
+  ) +
+  guides(
+    fill = guide_legend(
+      order = 1,
+      title.position = "top",
+      nrow = 2,
+      byrow = TRUE,
+      override.aes = list(size = 4)
+    ),
+    size = guide_legend(
+      order = 2,
+      title.position = "top",
+      nrow = 1,
+      override.aes = list(
+        fill = "grey70",
+        color = "grey45",
+        alpha = 1
+      )
+    )
+  ) +
+  theme(
+    legend.box = "vertical",
+    legend.box.just = "center"
+  )
+
+print(mn_scatter_plot)
+```
+
+# Summary statistics
+
+```{r metric-summary}
+summary_table <- boxplot_metric_long %>%
+  group_by(metric, field_label_short) %>%
+  summarise(
+    n = n(),
+    mean = mean(value),
+    sd = sd(value),
+    median = median(value),
+    q1 = quantile(value, 0.25),
+    q3 = quantile(value, 0.75),
+    .groups = "drop"
+  ) %>%
+  mutate(metric_label = unname(metric_labels[metric])) %>%
+  select(metric, metric_label, field_label_short, everything())
+
+write.csv(
+  summary_table,
+  file.path(comparison_result_dir, "empirical_field_metric_summary.csv"),
+  row.names = FALSE
+)
+```
+
+The table below reports each metric as the median, with the interquartile
+range (IQR) in parentheses, for all empirical networks and for each of the
+five selected Clinical Topics.
+
+```{r median-iqr-table, results='asis'}
+metric_table_layout <- tribble(
+  ~metric,                              ~metric_group,             ~network_type,
+  "density",                           "Density",                 "Unipartite",
+  "bi_density",                        "Density",                 "Bipartite",
+  "mean_unipartite_unweighted_degree", "Mean degree",             "Unipartite (treatments)",
+  "mean_bipartite_trial_degree",       "Mean degree",             "Bipartite (trial)",
+  "mean_bipartite_treatment_degree",   "Mean degree",             "Bipartite (treatments)",
+  "unipartite_c",                      "Clustering coefficient",  "Unipartite",
+  "avg_path_length",                   "Average path length",     "Unipartite",
+  "assortativity",                     "Degree assortativity",    "Unipartite",
+  "bi_assortativity",                  "Degree assortativity",    "Bipartite",
+  "deg_irreg",                         "Degree irregularity",     "Unipartite",
+  "bi_trial_deg_irreg",                "Degree irregularity",     "Bipartite (trial)",
+  "bi_treatment_deg_irreg",            "Degree irregularity",     "Bipartite (treatments)",
+  "N_treatments",                      "Network size",             "Treatments",
+  "N_total_trials",                    "Network size",             "Trials",
+  "number_of_arms",                    "Number of edges",          "Bipartite (arms)",
+  "number_of_distinct_treatment_comparisons", "Number of edges", "Unipartite (distinct comparisons)"
+)
+
+metric_table_digits <- setNames(
+  rep(2L, length(metric_names)),
+  metric_names
+)
+metric_table_digits[c(
+  "N_treatments", "N_total_trials", "number_of_arms",
+  "number_of_distinct_treatment_comparisons"
+)] <- 1L
+
+format_table_number <- function(x, digits) {
+  if (!is.finite(x)) {
+    return("&mdash;")
+  }
+  formatC(x, format = "f", digits = digits)
+}
+
+median_iqr_long <- summary_table %>%
+  inner_join(metric_table_layout, by = "metric") %>%
+  mutate(
+    metric_order = match(metric, metric_table_layout$metric),
+    field_label_short = as.character(field_label_short),
+    digits = unname(metric_table_digits[metric]),
+    median_iqr = pmap_chr(
+      list(median, q1, q3, digits),
+      function(median_value, q1_value, q3_value, digits_value) {
+        paste0(
+          format_table_number(median_value, digits_value),
+          " (",
+          format_table_number(q3_value - q1_value, digits_value),
+          ")"
+        )
+      }
+    )
+  )
+
+table_field_levels <- c("Overall", field_levels)
+
+median_iqr_wide <- median_iqr_long %>%
+  select(
+    metric_order, metric_group, network_type,
+    field_label_short, median_iqr
+  ) %>%
+  complete(
+    nesting(metric_order, metric_group, network_type),
+    field_label_short = table_field_levels,
+    fill = list(median_iqr = "&mdash;")
+  ) %>%
+  mutate(
+    field_label_short = factor(
+      field_label_short,
+      levels = table_field_levels
+    )
+  ) %>%
+  arrange(metric_order, field_label_short) %>%
+  pivot_wider(
+    names_from = field_label_short,
+    values_from = median_iqr
+  ) %>%
+  arrange(metric_order)
+
+write.csv(
+  median_iqr_wide %>%
+    select(-metric_order) %>%
+    mutate(across(everything(), ~ gsub("&mdash;", "NA", .x))),
+  file.path(
+    comparison_result_dir,
+    "empirical_field_metric_median_iqr.csv"
+  ),
+  row.names = FALSE
+)
+
+median_iqr_display <- median_iqr_wide %>%
+  filter(
+    metric_order %in% match(metric_names, metric_table_layout$metric)
+  ) %>%
+  mutate(
+    metric_group = if_else(
+      duplicated(metric_group),
+      "",
+      paste0("<strong>", metric_group, "</strong>")
+    ),
+    across(
+      all_of(table_field_levels),
+      ~ sub(" ", "<br>", .x, fixed = TRUE)
+    )
+  ) %>%
+  select(-metric_order)
+
+kable(
+  median_iqr_display,
+  format = "html",
+  escape = FALSE,
+  align = c("l", "l", rep("c", length(table_field_levels))),
+  col.names = c("Metric", "Network", table_field_levels),
+  caption = "Network metrics reported as median (IQR).",
+  table.attr = paste0(
+    'id="tab:metrics_median_iqr" ',
+    'class="table table-condensed" ',
+    'style="width:100%; font-size:90%;"'
+  )
+)
+```
+
+# Statistical comparisons
+
+For each numeric metric, the Kruskal--Wallis test compares the selected Clinical Topics
+with one another. The Wilcoxon rank-sum tests reproduce the exploratory
+comparison of each selected Clinical Topic with the overall empirical distribution.
+Benjamini--Hochberg adjustment is applied across all tests in each family, and
+the adjusted p-value is the primary inferential result. In this report,
+adjusted p-values rounded to two decimal places at or below
+`r sprintf("%.2f", significance_threshold)` are interpreted as evidence of a
+distributional difference.
+
+```{r statistical-tests}
+kruskal_results <- field_metric_long %>%
+  group_by(metric) %>%
+  summarise(
+    n = n(),
+    p_value = kruskal.test(value ~ field_label_short)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adjust_bh = p.adjust(p_value, method = "BH"),
+    metric_label = unname(metric_labels[metric])
+  ) %>%
+  arrange(p_adjust_bh)
+
+overall_comparison_results <- map_dfr(metric_names, function(metric_name) {
+  overall_values <- overall_metric_long %>%
+    filter(metric == metric_name) %>%
+    pull(value)
+
+  field_metric_long %>%
+    filter(metric == metric_name) %>%
+    group_by(field_label_short) %>%
+    summarise(
+      metric = metric_name,
+      n_field = n(),
+      n_overall = length(overall_values),
+      p_value = wilcox.test(value, overall_values, exact = FALSE)$p.value,
+      median_field = median(value),
+      median_overall = median(overall_values),
+      mean_field = mean(value),
+      mean_overall = mean(overall_values),
+      .groups = "drop"
+    )
+}) %>%
+  mutate(
+    p_adjust_bh = p.adjust(p_value, method = "BH"),
+    metric_label = unname(metric_labels[metric]),
+    direction = case_when(
+      median_field > median_overall ~ "higher",
+      median_field < median_overall ~ "lower",
+      TRUE ~ "equal"
+    )
+  ) %>%
+  arrange(p_adjust_bh)
+
+write.csv(
+  kruskal_results,
+  file.path(comparison_result_dir, "empirical_field_kruskal_wallis.csv"),
+  row.names = FALSE
+)
+write.csv(
+  overall_comparison_results,
+  file.path(comparison_result_dir, "empirical_field_vs_overall_wilcoxon.csv"),
+  row.names = FALSE
+)
+```
+
+```{r test-interpretation, results='asis'}
+significant_kruskal <- kruskal_results %>%
+  filter(round(p_adjust_bh, 2) <= significance_threshold)
+significant_wilcoxon <- overall_comparison_results %>%
+  filter(round(p_adjust_bh, 2) <= significance_threshold)
+
+if (nrow(significant_kruskal) == 0L) {
+  cat(
+    "No numeric metric had a Benjamini--Hochberg adjusted p-value, rounded ",
+    "to two decimal places, at or below ", significance_threshold,
+    " across the eligible Clinical Topics.\n\n",
+    sep = ""
+  )
+} else {
+  cat(
+    "Metrics with Benjamini--Hochberg adjusted p-values, rounded to two ",
+    "decimal places, at or below ", significance_threshold,
+    " across eligible Clinical Topics: ",
+    paste(significant_kruskal$metric_label, collapse = "; "),
+    ".\n\n",
+    sep = ""
+  )
+}
+
+if (nrow(significant_wilcoxon) == 0L) {
+  cat(
+    "No Clinical Topic--metric comparison with the overall empirical distribution ",
+    "had a Benjamini--Hochberg adjusted p-value, rounded to two decimal ",
+    "places, at or below ", significance_threshold, ".\n\n",
+    sep = ""
+  )
+} else {
+  significant_wilcoxon %>%
+    transmute(
+      `Clinical Topic` = as.character(field_label_short),
+      Metric = metric_label,
+      Direction = direction,
+      `Clinical Topic median` = sprintf("%.2f", median_field),
+      `Overall median` = sprintf("%.2f", median_overall),
+      `BH-adjusted p` = sprintf("%.2f", p_adjust_bh)
+    ) %>%
+    kable(
+      caption = paste(
+        "Clinical Topic--metric comparisons with Benjamini--Hochberg adjusted",
+        paste0(
+          "p-values rounded to two decimals at or below ",
+          significance_threshold
+        )
+      )
+    ) %>%
+    print()
+}
+```
+
+# Metric distributions
+
+Each panel compares the eligible Clinical Topics with the overall empirical
+distribution. Integer metrics with relatively few values use proportional bar
+charts; other metrics use a histogram for the overall distribution and
+frequency polygons for the selected Clinical Topics. Boxplots provide a common direct
+comparison.
+
+```{r distribution-functions}
+histogram_bins <- 15L
+
+dimension_axis_breaks <- function(minimum) {
+  function(limits) {
+    candidate_breaks <- breaks_pretty(n = 6)(limits)
+    sort(unique(c(
+      minimum,
+      candidate_breaks[candidate_breaks >= minimum]
+    )))
+  }
+}
+
+make_metric_distribution <- function(metric_name, force_histogram = FALSE) {
+  metric_label <- metric_labels[[metric_name]]
+  metric_values <- metric_long %>%
+    filter(metric == metric_name) %>%
+    pull(value)
+  integer_bars <- !force_histogram &&
+    all(metric_values == round(metric_values)) &&
+    n_distinct(metric_values) <= 30L
+
+  if (integer_bars) {
+    bar_data <- distribution_boxplot_metric_long %>%
+      filter(metric == metric_name) %>%
+      mutate(value = as.integer(round(value))) %>%
+      count(field_label_plot, value, name = "n") %>%
+      group_by(field_label_plot) %>%
+      mutate(proportion = n / sum(n)) %>%
+      ungroup()
+
+    return(
+      ggplot(
+        bar_data,
+        aes(x = factor(value), y = proportion, fill = field_label_plot)
+      ) +
+        geom_col(
+          position = position_dodge2(width = 0.9, preserve = "single"),
+          width = 0.8,
+          color = "white",
+          linewidth = 0.2
+        ) +
+        scale_fill_manual(
+          values = c(distribution_palette, Overall = overall_fill),
+          drop = FALSE
+        ) +
+        scale_y_continuous(labels = percent_format(accuracy = 1)) +
+        labs(
+          title = paste("Distribution:", metric_label),
+          x = metric_label,
+          y = "Proportion of networks",
+          fill = "Clinical Topic"
+        )
+    )
+  }
+
+  distribution_plot <- ggplot() +
+    geom_histogram(
+      data = overall_metric_long %>% filter(metric == metric_name),
+      aes(x = value, y = after_stat(count / sum(count))),
+      bins = histogram_bins,
+      fill = overall_fill,
+      alpha = 0.4,
+      color = "white",
+      linewidth = 0.2
+    ) +
+    geom_freqpoly(
+      data = distribution_field_metric_long %>%
+        filter(metric == metric_name),
+      aes(
+        x = value,
+        y = after_stat(count / ave(count, group, FUN = sum)),
+        color = field_label_plot
+      ),
+      bins = histogram_bins,
+      linewidth = 1
+    ) +
+    scale_color_manual(values = distribution_palette, drop = FALSE) +
+    scale_y_continuous(labels = percent_format(accuracy = 1)) +
+    labs(
+      title = paste("Distribution:", metric_label),
+      x = metric_label,
+      y = "Proportion of networks",
+      color = "Clinical Topic"
+    )
+
+  if (metric_name == "N_treatments") {
+    distribution_plot <- distribution_plot +
+      scale_x_continuous(
+        limits = c(4, NA),
+        breaks = dimension_axis_breaks(4),
+        labels = label_number(accuracy = 1)
+      )
+  }
+
+  if (metric_name == "N_total_trials") {
+    distribution_plot <- distribution_plot +
+      scale_x_continuous(
+        limits = c(2, NA),
+        breaks = dimension_axis_breaks(2),
+        labels = label_number(accuracy = 1)
+      )
+  }
+
+  distribution_plot
+}
+
+make_metric_boxplot <- function(metric_name) {
+  boxplot <- ggplot(
+    distribution_boxplot_metric_long %>% filter(metric == metric_name),
+    aes(x = field_label_plot, y = value, fill = field_label_plot)
+  ) +
+    geom_boxplot(outlier.alpha = 0.45, width = 0.7) +
+    scale_fill_manual(
+      values = c(distribution_palette, Overall = overall_fill),
+      drop = FALSE
+    ) +
+    labs(
+      title = paste("Boxplot:", metric_labels[[metric_name]]),
+      x = "Clinical Topic",
+      y = metric_labels[[metric_name]]
+    ) +
+    theme(legend.position = "none")
+
+  if (metric_name == "N_treatments") {
+    boxplot <- boxplot +
+      scale_y_continuous(
+        limits = c(4, NA),
+        breaks = dimension_axis_breaks(4),
+        labels = label_number(accuracy = 1)
+      )
+  }
+
+  if (metric_name == "N_total_trials") {
+    boxplot <- boxplot +
+      scale_y_continuous(
+        limits = c(2, NA),
+        breaks = dimension_axis_breaks(2),
+        labels = label_number(accuracy = 1)
+      )
+  }
+
+  boxplot
+}
+```
+
+```{r metric-distributions, results='asis'}
+plot_metric_names <- metric_names
+stopifnot(all(mean_degree_metric_names %in% plot_metric_names))
+
+for (metric_name in plot_metric_names) {
+  cat("\n\n## ", metric_labels[[metric_name]], "\n\n", sep = "")
+  print(make_metric_distribution(metric_name))
+  print(make_metric_boxplot(metric_name))
+}
+```
+
+```{r save-grouped-histograms, include=FALSE}
+histogram_figure_groups <- list(
+  density = list(
+    metrics = c("density", "bi_density")
+  ),
+  mean_degree = list(
+    metrics = c(
+      "mean_unipartite_unweighted_degree",
+      "mean_bipartite_trial_degree",
+      "mean_bipartite_treatment_degree"
+    )
+  ),
+  clustering_apl = list(
+    metrics = c("unipartite_c", "avg_path_length")
+  ),
+  degree_assortativity = list(
+    metrics = c("assortativity", "bi_assortativity")
+  ),
+  degree_irregularity = list(
+    metrics = c(
+      "deg_irreg",
+      "bi_trial_deg_irreg",
+      "bi_treatment_deg_irreg"
+    )
+  ),
+  network_size = list(
+    metrics = c("N_total_trials", "N_treatments")
+  ),
+  edge_counts = list(
+    metrics = c("number_of_distinct_treatment_comparisons", "number_of_arms")
+  )
+)
+
+stopifnot(all(
+  unlist(map(histogram_figure_groups, "metrics")) %in% metric_names
+))
+
+iwalk(histogram_figure_groups, function(group, group_name) {
+  panel_count <- length(group$metrics)
+  panel_subtitles <- if (group_name == "edge_counts") {
+    c(
+      "(a)",
+      "(b)"
+    )
+  } else {
+    paste0("(", letters[seq_len(panel_count)], ")")
+  }
+  grouped_plot <- wrap_plots(
+    map2(
+      group$metrics,
+      panel_subtitles,
+      ~ make_metric_distribution(.x, force_histogram = TRUE) +
+        labs(title = NULL, subtitle = .y)
+    ),
+    ncol = panel_count,
+    guides = "collect"
+  ) &
+    theme(
+      legend.position = "bottom",
+      plot.subtitle = element_text(face = "bold", hjust = 0.5)
+    )
+
+  print(grouped_plot)
+})
+```
+
+# Conclusion
+
+```{r conclusion-values, include=FALSE}
+kw_adjusted_p <- setNames(
+  kruskal_results$p_adjust_bh,
+  kruskal_results$metric
+)
+neoplasms_results <- overall_comparison_results %>%
+  filter(as.character(field_label_short) == "02") %>%
+  select(metric, p_adjust_bh)
+neoplasms_adjusted_p <- setNames(
+  neoplasms_results$p_adjust_bh,
+  neoplasms_results$metric
+)
+```
+
+Using unrounded Benjamini--Hochberg adjusted p-values below
+`r sprintf("%.2f", significance_threshold)`, the Kruskal--Wallis tests
+selected `r sum(kruskal_results$p_adjust_bh < significance_threshold, na.rm = TRUE)`
+metrics: `r paste(kruskal_results$metric_label[kruskal_results$p_adjust_bh < significance_threshold], collapse = "; ")`.
+The number of arms differed across Clinical Topics (adjusted \(p =\)
+`r sprintf("%.3f", kw_adjusted_p[["number_of_arms"]])`), while the number
+of distinct treatment comparisons did not meet this criterion (adjusted
+\(p =\) `r sprintf("%.3f", kw_adjusted_p[["number_of_distinct_treatment_comparisons"]])`).
+These omnibus tests do not identify which individual Clinical Topics differ.
+
+In the exploratory comparison of Clinical Topic 02 with the overall empirical
+distribution, the median number of arms was
+`r summary_table$median[summary_table$metric == "number_of_arms" & summary_table$field_label_short == "02"]`
+versus
+`r summary_table$median[summary_table$metric == "number_of_arms" & summary_table$field_label_short == "Overall"]`
+(adjusted \(p =\) `r sprintf("%.3f", neoplasms_adjusted_p[["number_of_arms"]])`).
+Because each Clinical Topic is contained in the overall sample, these
+Clinical Topic-versus-overall findings should remain exploratory and should
+not be interpreted as causal effects of Clinical Topic membership.

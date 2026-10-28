@@ -1,0 +1,29 @@
+"field","field_label_full","field_label_short","n_networks"
+1,"01: Certain infectious or parasitic diseases","01",2
+2,"02: Neoplasms","02",49
+3,"03: Diseases of the blood or blood-forming organs","03",4
+4,"04: Diseases of the immune system","04",2
+5,"05: Endocrine, nutritional or metabolic diseases","05",18
+6,"06: Mental, behavioural or neurodevelopmental disorders","06",29
+7,"07: Sleep-wake disorders","07",2
+8,"08: Diseases of the nervous system","08",21
+9,"09: Diseases of the visual system","09",7
+10,"10: Diseases of the ear or mastoid process","10",1
+11,"11: Diseases of the circulatory system","11",25
+12,"12: Diseases of the respiratory system","12",10
+13,"13: Diseases of the digestive system","13",26
+14,"14: Diseases of the skin","14",5
+15,"15: Diseases of the musculoskeletal system or connective tissue","15",15
+16,"16: Diseases of the genitourinary system","16",10
+18,"18: Pregnancy, childbirth or the puerperium","18",4
+19,"19: Certain conditions originating in the perinatal period","19",2
+21,"21: Symptoms, signs or clinical findings, not elsewhere classified","21",27
+22,"22: Injury, poisoning or certain other consequences of external causes","22",9
+23,"23: External causes of morbidity or mortality","23",1
+24,"24: Factors influencing health status or contact with health services","24",7
+25,"25: Codes for special purposes","25",5
+26,"26: Supplementary Clinical Topic Traditional Medicine Conditions - Module I","26",2
+27,"Dentistry","Dentistry",11
+28,"Education","Education",3
+29,"Other medical","Other medical",2
+30,"Other non-medical","Other non-medical",1
